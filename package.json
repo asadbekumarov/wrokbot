@@ -1,0 +1,15 @@
+{
+  "name": "telegram-job-filter",
+  "version": "1.0.0",
+  "description": "Telegram UserBot and Native Bot API Hybrid",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "telegram": "^2.22.2"
+  }
+}

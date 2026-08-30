@@ -1,0 +1,184 @@
+import { storage } from '../utils/storage.js';
+
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const MY_CHAT_ID = process.env.MY_CHAT_ID;
+const API_URL = `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+// Native API Fetch Yordamchi Funksiyasi
+async function request(method, payload = {}) {
+    try {
+        const res = await fetch(`${API_URL}/${method}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        return await res.json();
+    } catch (err) {
+        console.error(`[Bot Error] API call to ${method} failed:`, err.message);
+        return { ok: false };
+    }
+}
+
+// Telegram uchun HTML maxsus belgilarini tozalash (parse_error'ni oldini oladi)
+function escapeHtml(text) {
+    if (!text) return "";
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// UserBot topgan vakansiyani egasiga jo'natish funksiyasi
+export async function sendAlert(channelName, text, link) {
+    const escapedText = escapeHtml(text.substring(0, 3000)); // Limit qo'yamiz (3000 harf)
+    const msg = `🚨 <b>Yangi Vakansiya Topildi!</b>\n📌 <b>Kanal:</b> ${escapeHtml(channelName)}\n\n${escapedText}\n\n👉 <a href="${link}">Xabarga o'tish</a>`;
+    
+    await request('sendMessage', {
+        chat_id: MY_CHAT_ID,
+        text: msg,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true
+    });
+}
+
+// Telegram botining Menu va Profilini sozlash
+async function setupBotProfile() {
+    await request('setMyCommands', {
+        commands: [
+            { command: 'start', description: 'Botni ishga tushirish' },
+            { command: 'keywords', description: 'Sozlamalarni ko\'rish' }
+        ]
+    });
+
+    await request('setMyDescription', {
+        description: "👋 Botga xush kelibsiz!\n\n🤖 Men sizning shaxsiy filtringizman.\n\nSiz kiritgan kanallarni tunu-kun kuzataman va faqat siz izlayotgan kalit so'zlarga mos ish o'rinlari/xabarlarni shu yerga yuboraman.\n\n👇 Boshlash uchun pastdagi tugmani bosing"
+    });
+}
+
+// Long Polling Sikli
+export async function startLongPolling() {
+    console.log('[NativeBot] Long polling boshlandi...');
+    await setupBotProfile();
+    let offset = 0;
+
+    while (true) {
+        const data = await request('getUpdates', { offset, timeout: 30 });
+        
+        if (data.ok && data.result.length > 0) {
+            for (const update of data.result) {
+                offset = update.update_id + 1; // Takrorlanishning oldini olish uchun ID ni suramiz
+                
+                if (update.message && update.message.text) {
+                    const chatId = update.message.chat.id.toString();
+                    
+                    // Ruxsatsiz foydalanuvchilarni e'tiborsiz qoldiramiz
+                    if (chatId !== MY_CHAT_ID) continue; 
+                    
+                    await handleCommand(update.message);
+                }
+            }
+        }
+        
+        // API dan bloklanib qolmaslik uchun qisqa tanaffus
+        await new Promise(r => setTimeout(r, 1000));
+    }
+}
+
+// Global holat (faqat 1 ta foydalanuvchi bo'lgani uchun)
+let userState = null;
+
+const MAIN_KEYBOARD = {
+    keyboard: [
+        [{ text: "📊 Sozlamalar" }],
+        [{ text: "➕ So'z qo'shish" }, { text: "➖ So'z o'chirish" }],
+        [{ text: "➕ Kanal qo'shish" }, { text: "➖ Kanal o'chirish" }]
+    ],
+    resize_keyboard: true
+};
+
+const CANCEL_KEYBOARD = {
+    keyboard: [[{ text: "❌ Bekor qilish" }]],
+    resize_keyboard: true
+};
+
+// Buyruqlarni boshqarish (Chiroyli UI bilan)
+async function handleCommand(message) {
+    const text = message.text;
+    const firstName = message.from ? message.from.first_name : "Foydalanuvchi";
+    
+    const reply = async (msg, markup = MAIN_KEYBOARD) => request('sendMessage', { 
+        chat_id: MY_CHAT_ID, 
+        text: msg,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: markup
+    });
+
+    if (text === '/start' || text === '❌ Bekor qilish') {
+        userState = null;
+        await reply(`👋 Salom, <b>${escapeHtml(firstName)}</b>!\n\n🤖 <b>Xush kelibsiz!</b> Men sizning shaxsiy filtringizman.\n\nSiz kiritgan kanallarni tunu-kun kuzataman va faqat siz izlayotgan kalit so'zlarga mos ish o'rinlari/xabarlarni shu yerga yuboraman.\n\n👇 <i>Quyidagi tugmalardan foydalanib botni oson boshqaring:</i>`);
+        return;
+    }
+
+    if (text === '📊 Sozlamalar' || text === '/keywords') {
+        userState = null;
+        const data = await storage.read();
+        const kwList = data.keywords.length > 0 ? data.keywords.map(k => `🔸 <code>${k}</code>`).join('\n') : "<i>Hozircha bo'sh</i>";
+        const chList = data.channels.length > 0 ? data.channels.map(c => `🔹 ${c}`).join('\n') : "<i>Hozircha bo'sh</i>";
+        await reply(`📊 <b>Sizning sozlamalaringiz:</b>\n\n🔑 <b>Kalit so'zlar:</b>\n${kwList}\n\n📢 <b>Kuzatilayotgan Kanallar:</b>\n${chList}`);
+        return;
+    }
+
+    if (text === "➕ So'z qo'shish") {
+        userState = 'ADD_KEYWORD';
+        await reply("📝 <b>Qo'shmoqchi bo'lgan so'zingizni yozing:</b>", CANCEL_KEYBOARD);
+        return;
+    }
+
+    if (text === "➖ So'z o'chirish") {
+        userState = 'DEL_KEYWORD';
+        await reply("🗑 <b>O'chirmoqchi bo'lgan so'zingizni yozing:</b>", CANCEL_KEYBOARD);
+        return;
+    }
+
+    if (text === "➕ Kanal qo'shish") {
+        userState = 'ADD_CHANNEL';
+        await reply("📢 <b>Qo'shmoqchi bo'lgan kanal linkini yoki username'ni yozing:</b>\n<i>Misol: @kanal yoki t.me/kanal</i>", CANCEL_KEYBOARD);
+        return;
+    }
+
+    if (text === "➖ Kanal o'chirish") {
+        userState = 'DEL_CHANNEL';
+        await reply("🗑 <b>O'chirmoqchi bo'lgan kanalni yozing:</b>", CANCEL_KEYBOARD);
+        return;
+    }
+
+    // Holat (State) asosida xabarlarni qayta ishlash
+    if (userState === 'ADD_KEYWORD') {
+        const kAdded = await storage.addKeyword(text);
+        await reply(kAdded ? `✅ <b>Qo'shildi:</b> <code>${text}</code>` : `ℹ️ <b>Allaqachon mavjud:</b> <code>${text}</code>`);
+        userState = null;
+        return;
+    }
+    
+    if (userState === 'DEL_KEYWORD') {
+        const kDel = await storage.delKeyword(text);
+        await reply(kDel ? `🗑 <b>O'chirildi:</b> <code>${text}</code>` : `❌ <b>Topilmadi:</b> <code>${text}</code>`);
+        userState = null;
+        return;
+    }
+
+    if (userState === 'ADD_CHANNEL') {
+        const cAdded = await storage.addChannel(text);
+        await reply(cAdded ? `✅ <b>Kanal qo'shildi:</b> ${text}` : `ℹ️ <b>Allaqachon mavjud:</b> ${text}`);
+        userState = null;
+        return;
+    }
+
+    if (userState === 'DEL_CHANNEL') {
+        const cDel = await storage.delChannel(text);
+        await reply(cDel ? `🗑 <b>Kanal o'chirildi:</b> ${text}` : `❌ <b>Topilmadi:</b> ${text}`);
+        userState = null;
+        return;
+    }
+
+    // Noma'lum buyruqlar
+    await reply("❓ <b>Noma'lum buyruq yoki matn.</b>\nIltimos, pastdagi tugmalardan foydalaning.");
+}
