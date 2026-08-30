@@ -86,9 +86,10 @@ let userState = null;
 
 const MAIN_KEYBOARD = {
     keyboard: [
-        [{ text: "📊 Sozlamalar" }],
+        [{ text: "📊 Mening Sozlamalarim" }],
         [{ text: "➕ So'z qo'shish" }, { text: "➖ So'z o'chirish" }],
-        [{ text: "➕ Kanal qo'shish" }, { text: "➖ Kanal o'chirish" }]
+        [{ text: "➕ Kanal qo'shish" }, { text: "➖ Kanal o'chirish" }],
+        [{ text: "🔍 Yangi kanallarni qidirish" }]
     ],
     resize_keyboard: true
 };
@@ -117,7 +118,7 @@ async function handleCommand(message) {
         return;
     }
 
-    if (text === '📊 Sozlamalar' || text === '/keywords') {
+    if (text === '📊 Mening Sozlamalarim' || text === '📊 Sozlamalar' || text === '/keywords') {
         userState = null;
         const data = await storage.read();
         const kwList = data.keywords.length > 0 ? data.keywords.map(k => `🔸 <code>${k}</code>`).join('\n') : "<i>Hozircha bo'sh</i>";
@@ -150,31 +151,67 @@ async function handleCommand(message) {
         return;
     }
 
+    if (text === "🔍 Yangi kanallarni qidirish" || text === "🔍 Avto-Kanal Qidirish" || text === "🧠 Aqlli Analiz") {
+        userState = 'DEEP_SCAN';
+        await reply("🔍 <b>Kanal qidirish:</b>\n\nTelegramdan qaysi mavzudagi kanallarni topaylik? Bot siz izlagan so'zlar qatnashgan kanallarni izlab, avtomatik bazangizga qo'shadi.\n\n<i>Kerakli so'zlarni yozing:</i>\nMasalan: <code>ish vakansiya dasturchi</code>", CANCEL_KEYBOARD);
+        return;
+    }
+
     // Holat (State) asosida xabarlarni qayta ishlash
+    if (userState === 'AUTO_CHANNEL') {
+        const keywords = text.toLowerCase().split(' ').filter(k => k.trim());
+        await reply(`⏳ <i>Kanallar qidirilmoqda...</i>`);
+        try {
+            const { scanAndAddChannels } = await import('../userbot/client.js');
+            const addedCount = await scanAndAddChannels(keywords);
+            await reply(`✅ <b>Qidiruv yakunlandi!</b>\n\nTopilgan va bazaga qo'shilgan kanallar soni: <b>${addedCount}</b> ta.`, MAIN_KEYBOARD);
+        } catch (e) {
+            console.error("Avto kanal qidirishda xato:", e);
+            await reply(`❌ <b>Xatolik yuz berdi.</b>`, MAIN_KEYBOARD);
+        }
+        userState = null;
+        return;
+    }
+
+    if (userState === 'DEEP_SCAN') {
+        const keywords = text.toLowerCase().split(' ').filter(k => k.trim());
+        await reply(`⏳ <i>Aqlli analiz boshlandi! Barcha kanallaringizning oxirgi xabarlari o'qilmoqda...\nBu biroz ko'proq vaqt oladi, iltimos kuting.</i>`);
+        try {
+            const { deepScanAndAddChannels } = await import('../userbot/client.js');
+            const addedCount = await deepScanAndAddChannels(keywords);
+            await reply(`✅ <b>Aqlli Analiz yakunlandi!</b>\n\nTopilgan va bazaga qo'shilgan kanallar soni: <b>${addedCount}</b> ta.`, MAIN_KEYBOARD);
+        } catch (e) {
+            console.error("Aqlli analizda xato:", e);
+            await reply(`❌ <b>Xatolik yuz berdi.</b>`, MAIN_KEYBOARD);
+        }
+        userState = null;
+        return;
+    }
+
     if (userState === 'ADD_KEYWORD') {
         const kAdded = await storage.addKeyword(text);
-        await reply(kAdded ? `✅ <b>Qo'shildi:</b> <code>${text}</code>` : `ℹ️ <b>Allaqachon mavjud:</b> <code>${text}</code>`);
+        await reply(kAdded ? `✅ <b>Qo'shildi:</b> <code>${text}</code>` : `ℹ️ <b>Allaqachon mavjud:</b> <code>${text}</code>`, MAIN_KEYBOARD);
         userState = null;
         return;
     }
     
     if (userState === 'DEL_KEYWORD') {
         const kDel = await storage.delKeyword(text);
-        await reply(kDel ? `🗑 <b>O'chirildi:</b> <code>${text}</code>` : `❌ <b>Topilmadi:</b> <code>${text}</code>`);
+        await reply(kDel ? `🗑 <b>O'chirildi:</b> <code>${text}</code>` : `❌ <b>Topilmadi:</b> <code>${text}</code>`, MAIN_KEYBOARD);
         userState = null;
         return;
     }
 
     if (userState === 'ADD_CHANNEL') {
         const cAdded = await storage.addChannel(text);
-        await reply(cAdded ? `✅ <b>Kanal qo'shildi:</b> ${text}` : `ℹ️ <b>Allaqachon mavjud:</b> ${text}`);
+        await reply(cAdded ? `✅ <b>Kanal qo'shildi:</b> ${text}` : `ℹ️ <b>Allaqachon mavjud:</b> ${text}`, MAIN_KEYBOARD);
         userState = null;
         return;
     }
 
     if (userState === 'DEL_CHANNEL') {
         const cDel = await storage.delChannel(text);
-        await reply(cDel ? `🗑 <b>Kanal o'chirildi:</b> ${text}` : `❌ <b>Topilmadi:</b> ${text}`);
+        await reply(cDel ? `🗑 <b>Kanal o'chirildi:</b> ${text}` : `❌ <b>Topilmadi:</b> ${text}`, MAIN_KEYBOARD);
         userState = null;
         return;
     }

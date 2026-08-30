@@ -6,6 +6,79 @@ import { stdin as input, stdout as output } from 'process';
 import { storage } from '../utils/storage.js';
 import { sendAlert } from '../bot/nativeBot.js';
 
+let globalClient = null;
+
+export async function scanAndAddChannels(keywordsArray) {
+    if (!globalClient) return 0;
+    let addedCount = 0;
+    try {
+        const dialogs = await globalClient.getDialogs({});
+        for (const dialog of dialogs) {
+            if (dialog.isChannel || dialog.isGroup) {
+                const title = (dialog.title || '').toLowerCase();
+                const username = (dialog.entity?.username || '').toLowerCase();
+                const matches = keywordsArray.some(kw => title.includes(kw) || username.includes(kw));
+                
+                if (matches) {
+                    const channelIdentifier = dialog.entity?.username ? `@${dialog.entity.username}` : dialog.entity?.id?.toString();
+                    if (channelIdentifier) {
+                        const added = await storage.addChannel(channelIdentifier);
+                        if (added) addedCount++;
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        console.error("Error scanning channels:", e);
+    }
+    return addedCount;
+}
+
+export async function deepScanAndAddChannels(keywordsArray) {
+    if (!globalClient) return 0;
+    let addedCount = 0;
+    try {
+        const dialogs = await globalClient.getDialogs({});
+        for (const dialog of dialogs) {
+            if (dialog.isChannel || dialog.isGroup) {
+                let matches = false;
+                
+                // Oldingi usul (nomidan qidirish) - bu har doim tez ishlaydi
+                const title = (dialog.title || '').toLowerCase();
+                const username = (dialog.entity?.username || '').toLowerCase();
+                matches = keywordsArray.some(kw => title.includes(kw) || username.includes(kw));
+
+                // Agar nomidan topilmasa, chuqur analiz qilamiz (xabarlarni o'qiymiz)
+                if (!matches) {
+                    try {
+                        const messages = await globalClient.getMessages(dialog.entity, { limit: 15 });
+                        for (const msg of messages) {
+                            const text = (msg.message || msg.text || '').toLowerCase();
+                            if (text && keywordsArray.some(kw => text.includes(kw))) {
+                                matches = true;
+                                break;
+                            }
+                        }
+                    } catch (err) {
+                        // Ba'zi kanallarni o'qish imkonsiz bo'lishi mumkin
+                    }
+                }
+                
+                if (matches) {
+                    const channelIdentifier = dialog.entity?.username ? `@${dialog.entity.username}` : dialog.entity?.id?.toString();
+                    if (channelIdentifier) {
+                        const added = await storage.addChannel(channelIdentifier);
+                        if (added) addedCount++;
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        console.error("Error deep scanning channels:", e);
+    }
+    return addedCount;
+}
+
 export async function startUserBot() {
     const apiId = parseInt(process.env.API_ID);
     const apiHash = process.env.API_HASH;
@@ -15,6 +88,7 @@ export async function startUserBot() {
     const client = new TelegramClient(stringSession, apiId, apiHash, {
         connectionRetries: 5,
     });
+    globalClient = client;
 
     const rl = readline.createInterface({ input, output });
 
@@ -46,9 +120,19 @@ export async function startUserBot() {
             const chat = await message.getChat();
             if (!chat) return;
 
-            let channelIdStr = chat.username ? `@${chat.username}` : chat.id.toString();
+            // Xususiy yozishmalarni (shaxsiy chatlarni) o'tkazib yuboramiz
+            if (chat.className === 'User') return;
 
+            const msgTextLower = msgText.toLowerCase();
             const data = await storage.read();
+            
+            // Xabarda biz izlayotgan kalit so'zlardan biri bormi?
+            const foundKeyword = data.keywords.find(kw => msgTextLower.includes(kw));
+
+            // Agar umuman kalit so'z topilmasa, to'xtaymiz
+            if (!foundKeyword) return;
+
+            let channelIdStr = chat.username ? `@${chat.username}` : chat.id.toString();
             
             // Kanal data.json ichida bormi tekshiramiz (Case Insensitive)
             const isTargetChannel = data.channels.some(c => {
@@ -58,17 +142,19 @@ export async function startUserBot() {
                 return c === chat.id.toString();
             });
 
-            if (!isTargetChannel) return;
-
-            const msgTextLower = msgText.toLowerCase();
-            
-            // Kalit so'z borligini tekshiramiz
-            const foundKeyword = data.keywords.find(kw => msgTextLower.includes(kw));
-
-            if (foundKeyword) {
-                console.log(`[UserBot] Keyword '${foundKeyword}' topildi. Kanal: ${channelIdStr}`);
+            // Avtomatik KASHFIYOT funksiyasi (Real-time auto discovery)
+            // Agar kalit so'z topilgan bo'lsa va bu kanal hali bazamizda yo'q bo'lsa, uni qo'shamiz
+            if (!isTargetChannel) {
+                await storage.addChannel(channelIdStr);
+                console.log(`[UserBot] 🧠 Yangi ish kanali avto-kashf etildi va qo'shildi: ${channelIdStr}`);
                 
-                // Havolani (linkni) yig'amiz
+                // Egasi uchun kichik bildirishnoma yuborib qo'yamiz (optional, lekin yaxshi)
+                await sendAlert("🤖 Avto-Kashfiyot", `Yangi kanal bazangizga avtomatik qo'shildi!\nEndi bu kanal doimiy kuzatuvda bo'ladi.`, `https://t.me/${chat.username || 'c/'+chat.id}`);
+            }
+
+            console.log(`[UserBot] Keyword '${foundKeyword}' topildi. Kanal: ${channelIdStr}`);
+            
+            // Havolani (linkni) yig'amiz
                 let link = "";
                 if (chat.username) {
                     link = `https://t.me/${chat.username}/${message.id}`;
@@ -80,7 +166,6 @@ export async function startUserBot() {
                 
                 const channelName = chat.title || channelIdStr;
                 await sendAlert(channelName, msgText, link);
-            }
         } catch (error) {
             console.error("[UserBot] Xabarni qayta ishlashda xato:", error.message);
         }
