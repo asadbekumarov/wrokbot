@@ -44,11 +44,5 @@
     "node.js",
     "nodejs"
   ],
-  "channels": [
-    "@UstozShogird",
-    "@techjobs_vakansiya",
-    "@ayti_jobs",
-    "@testumarov",
-    "@devs_it"
-  ]
+  "channels": []
 }
