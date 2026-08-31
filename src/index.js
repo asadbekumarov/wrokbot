@@ -1,6 +1,18 @@
 import 'dotenv/config';
+import express from 'express';
 import { startUserBot } from './userbot/client.js';
 import { startLongPolling } from './bot/nativeBot.js';
+
+const app = express();
+const PORT = process.env.PORT || 8080;
+
+app.get('/', (req, res) => {
+    res.send('Bot is running...');
+});
+
+app.listen(PORT, () => {
+    console.log(`[System] Web server is running on port ${PORT}`);
+});
 
 // Dastur qulashining oldini olish uchun Global Exception Handler'lar
 process.on('unhandledRejection', (reason, promise) => {

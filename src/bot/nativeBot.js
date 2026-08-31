@@ -60,6 +60,9 @@ export async function startLongPolling() {
 
     while (true) {
         const data = await request('getUpdates', { offset, timeout: 30 });
+        if (!data.ok) {
+            console.log('[NativeBot] getUpdates failed:', data);
+        }
         
         if (data.ok && data.result.length > 0) {
             for (const update of data.result) {
@@ -67,9 +70,12 @@ export async function startLongPolling() {
                 
                 if (update.message && update.message.text) {
                     const chatId = update.message.chat.id.toString();
-                    
+                    console.log(`[NativeBot] Received message from ${chatId}, expected ${MY_CHAT_ID}`);
                     // Ruxsatsiz foydalanuvchilarni e'tiborsiz qoldiramiz
-                    if (chatId !== MY_CHAT_ID) continue; 
+                    if (chatId !== MY_CHAT_ID) {
+                        console.log(`[NativeBot] Ignoring message from unauthorized user: ${chatId}`);
+                        continue; 
+                    }
                     
                     await handleCommand(update.message);
                 }

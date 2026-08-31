@@ -44,5 +44,8 @@
     "node.js",
     "nodejs"
   ],
-  "channels": []
+  "channels": [
+    "@testumarov",
+    "@All_IT_chat"
+  ]
 }

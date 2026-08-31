@@ -47,11 +47,20 @@ export const storage = {
 
     async addChannel(channel) {
         let norm = channel.trim();
-        if (norm.includes('t.me/')) norm = '@' + norm.split('t.me/')[1].replace('/', '');
-        else if (!norm.startsWith('@') && isNaN(norm)) norm = '@' + norm;
+        if (norm.includes('t.me/')) {
+            let parts = norm.split('t.me/')[1].split('?')[0].split('/');
+            if (parts[0] === 'c' && parts[1]) {
+                norm = '-100' + parts[1];
+            } else {
+                norm = '@' + parts[0];
+            }
+        } else if (!norm.startsWith('@') && isNaN(norm) && !norm.startsWith('-')) {
+            norm = '@' + norm;
+        }
+        if (norm.startsWith('@')) norm = norm.toLowerCase();
 
         const data = await this.read();
-        if (!data.channels.includes(norm)) {
+        if (!data.channels.find(c => c.toLowerCase() === norm.toLowerCase())) {
             data.channels.push(norm);
             await this.write(data);
             return true;
@@ -61,12 +70,21 @@ export const storage = {
 
     async delChannel(channel) {
         let norm = channel.trim();
-        if (norm.includes('t.me/')) norm = '@' + norm.split('t.me/')[1].replace('/', '');
-        else if (!norm.startsWith('@') && isNaN(norm)) norm = '@' + norm;
+        if (norm.includes('t.me/')) {
+            let parts = norm.split('t.me/')[1].split('?')[0].split('/');
+            if (parts[0] === 'c' && parts[1]) {
+                norm = '-100' + parts[1];
+            } else {
+                norm = '@' + parts[0];
+            }
+        } else if (!norm.startsWith('@') && isNaN(norm) && !norm.startsWith('-')) {
+            norm = '@' + norm;
+        }
+        if (norm.startsWith('@')) norm = norm.toLowerCase();
 
         const data = await this.read();
         const initialLen = data.channels.length;
-        data.channels = data.channels.filter(c => c !== norm);
+        data.channels = data.channels.filter(c => c.toLowerCase() !== norm.toLowerCase());
         if (data.channels.length !== initialLen) {
             await this.write(data);
             return true;
