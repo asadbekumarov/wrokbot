@@ -15,6 +15,7 @@ export function setupBotHandlers(client) {
         } else if (text.startsWith('/addkalit ')) {
             const kw = text.substring('/addkalit '.length).trim();
             if (kw) {
+                // debugger;
                 const added = await storage.addKeyword(kw);
                 await client.sendMessage(message.chatId, { message: added ? `"${kw}" kalit so'zi qo'shildi. ✅` : `"${kw}" kalit so'zi avvaldan mavjud. ℹ️` });
             }
