@@ -184,7 +184,7 @@ export async function startUserBot() {
                 }
                 
                 const channelName = chat.title || channelIdStr;
-                await sendAlert(channelName, msgText, link);
+                await sendAlert(channelName, msgText, link, channelIdStr);
         } catch (error) {
             console.error("[UserBot] Xabarni qayta ishlashda xato:", error.message);
         }

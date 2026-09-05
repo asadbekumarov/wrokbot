@@ -11,6 +11,7 @@ export const storage = {
             if (!Array.isArray(parsed.keywords)) parsed.keywords = [];
             if (!Array.isArray(parsed.channels)) parsed.channels = [];
             if (!Array.isArray(parsed.stopWords)) parsed.stopWords = [];
+            if (!Array.isArray(parsed.savedVacancies)) parsed.savedVacancies = [];
             return parsed;
         } catch (err) {
             if (err.code === 'ENOENT') {
@@ -140,5 +141,45 @@ export const storage = {
             return true;
         }
         return false;
+    },
+
+    async addSavedVacancy(vacancy) {
+        const data = await this.read();
+        data.savedVacancies = data.savedVacancies || [];
+        const exists = data.savedVacancies.find(v => (vacancy.id && v.id === vacancy.id) || (vacancy.link && v.link === vacancy.link));
+        if (!exists) {
+            data.savedVacancies.unshift({
+                id: vacancy.id,
+                channelName: vacancy.channelName,
+                text: vacancy.text,
+                link: vacancy.link,
+                channelIdentifier: vacancy.channelIdentifier,
+                savedAt: new Date().toLocaleString('uz-UZ')
+            });
+            if (data.savedVacancies.length > 200) {
+                data.savedVacancies = data.savedVacancies.slice(0, 200);
+            }
+            await this.write(data);
+            return true;
+        }
+        return false;
+    },
+
+    async getSavedVacancies() {
+        const data = await this.read();
+        return data.savedVacancies || [];
+    },
+
+    async removeSavedVacancy(id) {
+        const data = await this.read();
+        data.savedVacancies = data.savedVacancies || [];
+        const initialLen = data.savedVacancies.length;
+        data.savedVacancies = data.savedVacancies.filter(v => v.id !== id);
+        if (data.savedVacancies.length !== initialLen) {
+            await this.write(data);
+            return true;
+        }
+        return false;
     }
 };
+
