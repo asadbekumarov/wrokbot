@@ -1,598 +1,601 @@
-import { storage } from '../utils/storage.js';
-import { formatVacancyAlert, escapeHtml, extractContacts } from '../utils/formatter.js';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const TelegramBot = require('node-telegram-bot-api');
+import { env } from '../config/env.js';
+import { logger } from '../utils/logger.js';
+import { t } from '../locales/i18n.js';
+import {
+    getUser,
+    upsertUser,
+    getKeywords,
+    getStopWords,
+    getUserState,
+    saveVacancy,
+    getSavedVacancies,
+    getSavedVacanciesCount,
+    deleteSavedVacancy,
+    clearSavedVacancies,
+    isVacancySaved
+} from '../database/db.js';
+import { escapeHtml } from '../utils/filter.js';
+import { registerAlertSender, isUserSessionActive } from '../userbot/sessionManager.js';
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const MY_CHAT_ID = process.env.MY_CHAT_ID;
-const API_URL = `https://api.telegram.org/bot${BOT_TOKEN}`;
+import { handleLanguageCommand, handleLanguageCallback } from './handlers/languageHandler.js';
+import { handleKeywordsCommand, handleStopWordsCommand, handleKeywordCallback, processKeywordTextInput } from './handlers/keywordHandler.js';
+import { handleLoginCommand, handleLogoutCommand, handleAuthCallback, processAuthTextInput } from './handlers/authHandler.js';
 
-// Native API Fetch Yordamchi Funksiyasi
-async function request(method, payload = {}) {
+let bot = null;
+
+// Vaqtinchalik xotira: xabarlar ostidagi ⭐ Saqlash tugmasi uchun
+// vacancyId -> vacancyData
+const memoryVacancies = new Map();
+
+export function initBot() {
+    if (bot) return bot;
+
+    bot = new TelegramBot(env.botToken, {
+        polling: {
+            interval: 300,
+            autoStart: true,
+            params: {
+                timeout: 10
+            }
+        }
+    });
+
+    // Sessiya menejeri uchun bildirishnoma jo'natuvchini ro'yxatdan o'tkazish
+    registerAlertSender(sendVacancyAlert);
+
+    // Polling xatolarini ushlash (uzilishlarda bot qulamasligi uchun)
+    bot.on('polling_error', (error) => {
+        if (error?.code !== 'EFATAL' && !error?.message?.includes('ETELEGRAM: 409')) {
+            // oddiy tarmoq tanaffuslari
+        } else {
+            logger.warn('BOT_POLLING', `Polling xabari: ${error.message || error.code}`);
+        }
+    });
+
+    // Bot komandalarini ro'yxatga olish
+    setupBotCommands();
+    setupBotListeners();
+
+    logger.bot("Telegram Bot API (Long Polling) muvaffaqiyatli ishga tushdi 🟢");
+    return bot;
+}
+
+async function setupBotCommands() {
     try {
-        const res = await fetch(`${API_URL}/${method}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-        return await res.json();
+        await bot.setMyCommands([
+            { command: 'start', description: 'Botni ishga tushirish / qayta yuklash' },
+            { command: 'login', description: 'Telegram hisobini ulash (SMS kod)' },
+            { command: 'keywords', description: 'Qidiruv kalit so\'zlarini sozlash' },
+            { command: 'stopwords', description: 'Anti-CV va stop-so\'zlar' },
+            { command: 'saved', description: 'Saqlangan vakansiyalar' },
+            { command: 'status', description: 'Hisob va monitoring holati' },
+            { command: 'language', description: 'Tilni o\'zgartirish / Choose language' },
+            { command: 'logout', description: 'Hisobni uzish' },
+            { command: 'help', description: 'Qo\'llanma va yordam' }
+        ]);
     } catch (err) {
-        console.error(`[Bot Error] API call to ${method} failed:`, err.message);
-        return { ok: false };
+        logger.error('BOT_INIT', `Buyruqlarni o'rnatishda xato: ${err.message}`);
     }
 }
 
-// Oxirgi topilgan vakansiyalar xotirasi (Inline tugmalar uchun)
-export const recentVacancies = new Map();
-
-// UserBot topgan vakansiyani egasiga jo'natish funksiyasi
-export async function sendAlert(channelName, text, link, channelIdentifier = null, matchedKeywords = []) {
-    let msg = "";
-    let cleanText = text;
-    let contacts = { telegram: [], phones: [], emails: [] };
-
-    if (channelIdentifier) {
-        const formatted = formatVacancyAlert({
-            channelName,
-            text,
-            link,
-            keywords: matchedKeywords,
-            channelIdentifier
-        });
-        msg = formatted.formattedText;
-        cleanText = formatted.cleanText;
-        contacts = formatted.contacts;
-    } else {
-        msg = `🚨 <b>${escapeHtml(channelName)}</b>\n\n${escapeHtml(text)}`;
-    }
-    
-    let reply_markup = undefined;
-
-    // Agar bu vakansiya bo'lsa (channelIdentifier uzatilgan bo'lsa), Inline tugmalar ulaymiz
-    if (channelIdentifier) {
-        const vacancyId = 'v_' + Math.random().toString(36).substring(2, 9);
-        recentVacancies.set(vacancyId, {
-            id: vacancyId,
-            channelName,
-            text: cleanText,
-            link,
-            channelIdentifier,
-            matchedKeywords,
-            contacts,
-            saved: false,
-            channelDeleted: false
-        });
-
-        // Xotira to'lib ketmasligi uchun 300 tadan oshganda eskisini o'chiramiz
-        if (recentVacancies.size > 300) {
-            const firstKey = recentVacancies.keys().next().value;
-            recentVacancies.delete(firstKey);
-        }
-
-        const inline_keyboard = [
+export function getMainInlineKeyboard(lang = 'uz') {
+    return {
+        inline_keyboard: [
             [
-                { text: "⭐ Saqlash", callback_data: `save_${vacancyId}` },
-                { text: "🚫 Kanalni o'chirish", callback_data: `delch_${vacancyId}` }
+                { text: t(lang, 'menu_status'), callback_data: "menu_status" },
+                { text: t(lang, 'menu_keywords'), callback_data: "menu_keywords" }
+            ],
+            [
+                { text: t(lang, 'menu_saved'), callback_data: "menu_saved" },
+                { text: t(lang, 'menu_stopwords'), callback_data: "menu_stopwords" }
+            ],
+            [
+                { text: t(lang, 'menu_language'), callback_data: "menu_language" },
+                { text: t(lang, 'menu_help'), callback_data: "menu_help" }
             ]
-        ];
-
-        if (link && link.startsWith('http')) {
-            inline_keyboard.push([
-                { text: "🔗 Asl post", url: link }
-            ]);
-        }
-
-        reply_markup = { inline_keyboard };
-    } else {
-        if (link) {
-            msg += `\n\n👉 <a href="${link}">Xabarga o'tish</a>`;
-        }
-    }
-    
-    const payload = {
-        chat_id: MY_CHAT_ID,
-        text: msg,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true
-    };
-    if (reply_markup) {
-        payload.reply_markup = reply_markup;
-    }
-
-    await request('sendMessage', payload);
-}
-
-// Telegram botining Menu va Profilini sozlash
-async function setupBotProfile() {
-    await request('setMyCommands', {
-        commands: [
-            { command: 'start', description: 'Botni ishga tushirish' },
-            { command: 'keywords', description: 'Sozlamalarni ko\'rish' },
-            { command: 'saved', description: 'Saqlangan vakansiyalar' }
         ]
-    });
-
-    await request('setMyDescription', {
-        description: "👋 Botga xush kelibsiz!\n\n🤖 Men sizning shaxsiy filtringizman.\n\nSiz kiritgan kanallarni tunu-kun kuzataman va faqat siz izlayotgan kalit so'zlarga mos ish o'rinlari/xabarlarni shu yerga yuboraman.\n\n👇 Boshlash uchun pastdagi tugmani bosing"
-    });
+    };
 }
 
-// Long Polling Sikli
-export async function startLongPolling() {
-    console.log('[NativeBot] Long polling boshlandi...');
-    await setupBotProfile();
-    let offset = 0;
+function setupBotListeners() {
+    // ---------------------------------------------------------
+    // 1. BUYRUQLAR (COMMANDS)
+    // ---------------------------------------------------------
 
-    while (true) {
-        const data = await request('getUpdates', { offset, timeout: 30 });
-        if (!data.ok) {
-            console.log('[NativeBot] getUpdates failed:', data);
+    bot.onText(/\/start/, async (msg) => {
+        const userId = msg.from.id;
+        const firstName = msg.from.first_name || 'Foydalanuvchi';
+        
+        let user = getUser(userId);
+        if (!user) {
+            user = upsertUser(userId, null, null, 'uz');
         }
-        
-        if (data.ok && data.result.length > 0) {
-            for (const update of data.result) {
-                offset = update.update_id + 1; // Takrorlanishning oldini olish uchun ID ni suramiz
-                
-                // 1. Matnli xabarlar
-                if (update.message && update.message.text) {
-                    const chatId = update.message.chat.id.toString();
-                    if (chatId !== MY_CHAT_ID) {
-                        console.log(`[NativeBot] Ignoring message from unauthorized user: ${chatId}`);
-                        continue; 
-                    }
-                    await handleCommand(update.message);
-                }
 
-                // 2. Inline tugmalar (Callback Query)
-                if (update.callback_query) {
-                    const callbackQuery = update.callback_query;
-                    const fromId = callbackQuery.from ? callbackQuery.from.id.toString() : '';
-                    if (fromId !== MY_CHAT_ID) {
-                        console.log(`[NativeBot] Ignoring callback from unauthorized user: ${fromId}`);
-                        continue;
-                    }
-                    await handleCallbackQuery(callbackQuery);
+        const lang = user?.language || 'uz';
+        const welcomeText = t(lang, 'welcome', { name: escapeHtml(firstName) });
+
+        const isLoggedIn = Boolean(user && user.session_data && user.is_active);
+
+        // Agar foydalanuvchi hali login qilmagan bo'lsa: FAQAT bitta login tugmasi chiqadi
+        if (!isLoggedIn) {
+            const notLoggedInMsg = `${welcomeText}\n\n${t(lang, 'not_logged_in_start')}`;
+            await bot.sendMessage(userId, notLoggedInMsg, {
+                parse_mode: 'HTML',
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: t(lang, 'login_btn'), callback_data: 'auth_login' }]
+                    ]
                 }
-            }
+            });
+            return;
         }
-        
-        // API dan bloklanib qolmaslik uchun qisqa tanaffus
-        await new Promise(r => setTimeout(r, 1000));
-    }
-}
 
-// Global holat (faqat 1 ta foydalanuvchi bo'lgani uchun)
-let userState = null;
+        // Agar foydalanuvchi allaqachon login qilgan bo'lsa:
+        const statusText = '\n\n' + t(lang, 'logged_in_status', { phone: user.phone || '—' });
 
-const MAIN_KEYBOARD = {
-    keyboard: [
-        [{ text: "📊 Mening Sozlamalarim" }, { text: "⭐ Saqlangan postlar" }],
-        [{ text: "➕ So'z qo'shish" }, { text: "➖ So'z o'chirish" }],
-        [{ text: "➕ Kanal qo'shish" }, { text: "➖ Kanal o'chirish" }],
-        [{ text: "🛑 Stop-so'z qo'shish" }, { text: "🗑 Stop-so'z o'chirish" }],
-        [{ text: "🔍 Yangi kanallarni qidirish" }]
-    ],
-    resize_keyboard: true
-};
-
-const CANCEL_KEYBOARD = {
-    keyboard: [[{ text: "❌ Bekor qilish" }]],
-    resize_keyboard: true
-};
-
-// Buyruqlarni boshqarish (Chiroyli UI bilan)
-async function handleCommand(message) {
-    const text = message.text;
-    const firstName = message.from ? message.from.first_name : "Foydalanuvchi";
-    
-    const reply = async (msg, markup = MAIN_KEYBOARD) => request('sendMessage', { 
-        chat_id: MY_CHAT_ID, 
-        text: msg,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true,
-        reply_markup: markup
-    });
-
-    if (text === '/start' || text === '❌ Bekor qilish') {
-        userState = null;
-        await reply(`👋 Salom, <b>${escapeHtml(firstName)}</b>!\n\n🤖 <b>Xush kelibsiz!</b> Men sizning shaxsiy filtringizman.\n\nSiz kiritgan kanallarni tunu-kun kuzataman va faqat siz izlayotgan kalit so'zlarga mos ish o'rinlari/xabarlarni shu yerga yuboraman.\n\n👇 <i>Quyidagi tugmalardan foydalanib botni oson boshqaring:</i>`);
-        return;
-    }
-
-    if (text === '📊 Mening Sozlamalarim' || text === '📊 Sozlamalar' || text === '/keywords') {
-        userState = null;
-        const data = await storage.read();
-        const kwList = data.keywords.length > 0 ? data.keywords.map(k => `🔸 <code>${escapeHtml(k)}</code>`).join('\n') : "<i>Hozircha bo'sh</i>";
-        const swList = (data.stopWords && data.stopWords.length > 0) ? data.stopWords.map(s => `🛑 <code>${escapeHtml(s)}</code>`).join('\n') : "<i>Hozircha bo'sh</i>";
-        const chList = data.channels.length > 0 ? data.channels.map(c => `🔹 ${escapeHtml(c)}`).join('\n') : "<i>Hozircha bo'sh</i>";
-        const savedCount = (data.savedVacancies && data.savedVacancies.length) || 0;
-        
-        await request('sendMessage', {
-            chat_id: MY_CHAT_ID,
-            text: `📊 <b>Sizning sozlamalaringiz:</b>\n\n🔑 <b>Kalit so'zlar (${data.keywords.length}):</b>\n${kwList}\n\n🛑 <b>Stop-so'zlar / Anti-CV (${data.stopWords ? data.stopWords.length : 0}):</b>\n${swList}\n\n📢 <b>Kuzatilayotgan Kanallar (${data.channels.length}):</b>\n${chList}\n\n⭐ <b>Saqlangan postlar soni:</b> ${savedCount} ta`,
+        await bot.sendMessage(userId, welcomeText + statusText, {
             parse_mode: 'HTML',
-            reply_markup: {
-                inline_keyboard: [
-                    [{ text: `⭐ Saqlangan postlarni ko'rish (${savedCount})`, callback_data: 'view_saved' }]
-                ]
-            }
+            reply_markup: { remove_keyboard: true }
         });
-        return;
-    }
 
-    if (text === '⭐ Saqlangan postlar' || text === '⭐ Saqlanganlar' || text === '⭐ Saqlangan Vakansiyalar' || text === '/saved' || text === 'saqlangan postlar') {
-        userState = null;
-        await showSavedVacancies(0);
-        return;
-    }
+        // Boshqaruv paneli
+        await bot.sendMessage(userId, t(lang, 'menu_panel_title'), {
+            parse_mode: 'HTML',
+            reply_markup: getMainInlineKeyboard(lang)
+        });
+    });
 
-    if (text === "➕ So'z qo'shish") {
-        userState = 'ADD_KEYWORD';
-        await reply("📝 <b>Qo'shmoqchi bo'lgan so'zingizni yozing:</b>", CANCEL_KEYBOARD);
-        return;
-    }
+    bot.onText(/\/login/, async (msg) => {
+        await handleLoginCommand(bot, msg);
+    });
 
-    if (text === "➖ So'z o'chirish") {
-        userState = 'DEL_KEYWORD';
-        await reply("🗑 <b>O'chirmoqchi bo'lgan so'zingizni yozing:</b>", CANCEL_KEYBOARD);
-        return;
-    }
+    bot.onText(/\/logout/, async (msg) => {
+        await handleLogoutCommand(bot, msg);
+    });
 
-    if (text === "➕ Kanal qo'shish") {
-        userState = 'ADD_CHANNEL';
-        await reply("📢 <b>Qo'shmoqchi bo'lgan kanal linkini yoki username'ni yozing:</b>\n<i>Misol: @kanal yoki t.me/kanal</i>", CANCEL_KEYBOARD);
-        return;
-    }
-
-    if (text === "➖ Kanal o'chirish") {
-        userState = 'DEL_CHANNEL';
-        await reply("🗑 <b>O'chirmoqchi bo'lgan kanalni yozing:</b>", CANCEL_KEYBOARD);
-        return;
-    }
-
-    if (text === "🛑 Stop-so'z qo'shish") {
-        userState = 'ADD_STOPWORD';
-        await reply("🛑 <b>Qo'shmoqchi bo'lgan stop-so'z yoki jumlani yozing:</b>\n<i>Misol: #rezyume yoki ish qidiryapti</i>", CANCEL_KEYBOARD);
-        return;
-    }
-
-    if (text === "🗑 Stop-so'z o'chirish") {
-        userState = 'DEL_STOPWORD';
-        await reply("🗑 <b>O'chirmoqchi bo'lgan stop-so'zni yozing:</b>", CANCEL_KEYBOARD);
-        return;
-    }
-
-    if (text === "🔍 Yangi kanallarni qidirish" || text === "🔍 Avto-Kanal Qidirish" || text === "🧠 Aqlli Analiz") {
-        userState = 'DEEP_SCAN';
-        await reply("🔍 <b>Kanal qidirish:</b>\n\nTelegramdan qaysi mavzudagi kanallarni topaylik? Bot siz izlagan so'zlar qatnashgan kanallarni izlab, avtomatik bazangizga qo'shadi.\n\n<i>Kerakli so'zlarni yozing:</i>\nMasalan: <code>ish vakansiya dasturchi</code>", CANCEL_KEYBOARD);
-        return;
-    }
-
-    // Holat (State) asosida xabarlarni qayta ishlash
-    if (userState === 'AUTO_CHANNEL') {
-        const keywords = text.toLowerCase().split(' ').filter(k => k.trim());
-        await reply(`⏳ <i>Kanallar qidirilmoqda...</i>`);
-        try {
-            const { scanAndAddChannels } = await import('../userbot/client.js');
-            const addedCount = await scanAndAddChannels(keywords);
-            await reply(`✅ <b>Qidiruv yakunlandi!</b>\n\nTopilgan va bazaga qo'shilgan kanallar soni: <b>${addedCount}</b> ta.`, MAIN_KEYBOARD);
-        } catch (e) {
-            console.error("Avto kanal qidirishda xato:", e);
-            await reply(`❌ <b>Xatolik yuz berdi.</b>`, MAIN_KEYBOARD);
+    function checkUserLoggedIn(userId, lang) {
+        const user = getUser(userId);
+        if (!user || !user.session_data || !user.is_active) {
+            bot.sendMessage(userId, t(lang, 'not_logged_in'), {
+                parse_mode: 'HTML',
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: t(lang, 'login_btn'), callback_data: 'auth_login' }]
+                    ]
+                }
+            });
+            return false;
         }
-        userState = null;
-        return;
+        return true;
     }
 
-    if (userState === 'DEEP_SCAN') {
-        const keywords = text.toLowerCase().split(' ').filter(k => k.trim());
-        await reply(`⏳ <i>Aqlli analiz boshlandi! Barcha kanallaringizning oxirgi xabarlari o'qilmoqda...\nBu biroz ko'proq vaqt oladi, iltimos kuting.</i>`);
-        try {
-            const { deepScanAndAddChannels } = await import('../userbot/client.js');
-            const addedCount = await deepScanAndAddChannels(keywords);
-            await reply(`✅ <b>Aqlli Analiz yakunlandi!</b>\n\nTopilgan va bazaga qo'shilgan kanallar soni: <b>${addedCount}</b> ta.`, MAIN_KEYBOARD);
-        } catch (e) {
-            console.error("Aqlli analizda xato:", e);
-            await reply(`❌ <b>Xatolik yuz berdi.</b>`, MAIN_KEYBOARD);
+    bot.onText(/\/keywords/, async (msg) => {
+        const user = getUser(msg.from.id);
+        const lang = user?.language || 'uz';
+        if (!checkUserLoggedIn(msg.from.id, lang)) return;
+        await handleKeywordsCommand(bot, msg);
+    });
+
+    bot.onText(/\/stopwords/, async (msg) => {
+        const user = getUser(msg.from.id);
+        const lang = user?.language || 'uz';
+        if (!checkUserLoggedIn(msg.from.id, lang)) return;
+        await handleStopWordsCommand(bot, msg);
+    });
+
+    bot.onText(/\/language/, async (msg) => {
+        await handleLanguageCommand(bot, msg);
+    });
+
+    bot.onText(/\/status/, async (msg) => {
+        const user = getUser(msg.from.id);
+        const lang = user?.language || 'uz';
+        if (!checkUserLoggedIn(msg.from.id, lang)) return;
+        await showUserStatus(msg.from.id);
+    });
+
+    bot.onText(/\/saved/, async (msg) => {
+        const user = getUser(msg.from.id);
+        const lang = user?.language || 'uz';
+        if (!checkUserLoggedIn(msg.from.id, lang)) return;
+        await showSavedVacancies(msg.from.id, 0);
+    });
+
+    bot.onText(/\/help/, async (msg) => {
+        const userId = msg.from.id;
+        const user = getUser(userId);
+        const lang = user?.language || 'uz';
+        await bot.sendMessage(userId, t(lang, 'help_text'), { parse_mode: 'HTML' });
+    });
+
+    // ---------------------------------------------------------
+    // 2. MATNLI XABARLAR VA FOYDALANUVCHI HOLATI (FSM)
+    // ---------------------------------------------------------
+
+    bot.on('message', async (msg) => {
+        // Buyruqlarga tegmaymiz (ular onText da ushlanadi)
+        if (!msg.text || msg.text.startsWith('/')) return;
+
+        const userId = msg.from.id;
+        const text = msg.text.trim();
+        const user = getUser(userId);
+        const lang = user?.language || 'uz';
+        const userState = getUserState(userId);
+
+        // A. Agar biror formani to'ldirayotgan bo'lsa (Login / Keywords)
+        if (userState && userState.state) {
+            // Login jarayoni
+            if (['AWAIT_PHONE', 'AWAIT_CODE', 'AWAIT_2FA'].includes(userState.state)) {
+                const handled = await processAuthTextInput(bot, msg, userState);
+                if (handled) return;
+            }
+
+            // Kalit so'z yoki Stop-so'z kiritish
+            if (['AWAIT_KEYWORD_ADD', 'AWAIT_STOPWORD_ADD'].includes(userState.state)) {
+                const handled = await processKeywordTextInput(bot, msg, userState);
+                if (handled) return;
+            }
         }
-        userState = null;
-        return;
-    }
 
-    if (userState === 'ADD_KEYWORD') {
-        const kAdded = await storage.addKeyword(text);
-        await reply(kAdded ? `✅ <b>Qo'shildi:</b> <code>${text}</code>` : `ℹ️ <b>Allaqachon mavjud:</b> <code>${text}</code>`, MAIN_KEYBOARD);
-        userState = null;
-        return;
-    }
-    
-    if (userState === 'DEL_KEYWORD') {
-        const kDel = await storage.delKeyword(text);
-        await reply(kDel ? `🗑 <b>O'chirildi:</b> <code>${text}</code>` : `❌ <b>Topilmadi:</b> <code>${text}</code>`, MAIN_KEYBOARD);
-        userState = null;
-        return;
-    }
+        // B. Asosiy Reply klaviatura tugmalari (barcha variantlar: yangi va eski tugmalar)
+        const lowerText = text.toLowerCase();
 
-    if (userState === 'ADD_CHANNEL') {
-        const cAdded = await storage.addChannel(text);
-        await reply(cAdded ? `✅ <b>Kanal qo'shildi:</b> ${text}` : `ℹ️ <b>Allaqachon mavjud:</b> ${text}`, MAIN_KEYBOARD);
-        userState = null;
-        return;
-    }
+        // 1. Sozlamalar / Status
+        if (
+            text === "📊 Status" || 
+            text === "📊 Holat" || 
+            text.includes("mening sozlamalarim") || 
+            text.includes("sozlamalar")
+        ) {
+            await showUserStatus(userId);
+            return;
+        }
 
-    if (userState === 'DEL_CHANNEL') {
-        const cDel = await storage.delChannel(text);
-        await reply(cDel ? `🗑 <b>Kanal o'chirildi:</b> ${text}` : `❌ <b>Topilmadi:</b> ${text}`, MAIN_KEYBOARD);
-        userState = null;
-        return;
-    }
+        // 2. Kalit so'zlar
+        if (text === "🔑 Kalit so'zlar" || text === "🔑 Keywords") {
+            await handleKeywordsCommand(bot, msg);
+            return;
+        }
 
-    if (userState === 'ADD_STOPWORD') {
-        const swAdded = await storage.addStopWord(text);
-        await reply(swAdded ? `✅ <b>Stop-so'z qo'shildi:</b> <code>${escapeHtml(text)}</code>` : `ℹ️ <b>Allaqachon mavjud:</b> <code>${escapeHtml(text)}</code>`, MAIN_KEYBOARD);
-        userState = null;
-        return;
-    }
+        // 3. So'z qo'shish (pastdagi tugma)
+        if (text.includes("so'z qo'shish") || text.includes("добавить слово") || text.includes("add keyword")) {
+            setUserState(userId, 'AWAIT_KEYWORD_ADD', {});
+            await bot.sendMessage(userId, t(lang, 'prompt_add_keyword'), {
+                parse_mode: 'HTML',
+                reply_markup: { remove_keyboard: true }
+            });
+            return;
+        }
 
-    if (userState === 'DEL_STOPWORD') {
-        const swDel = await storage.delStopWord(text);
-        await reply(swDel ? `🗑 <b>Stop-so'z o'chirildi:</b> <code>${escapeHtml(text)}</code>` : `❌ <b>Topilmadi:</b> <code>${escapeHtml(text)}</code>`, MAIN_KEYBOARD);
-        userState = null;
-        return;
-    }
+        // 4. So'z o'chirish (pastdagi tugma)
+        if (text.includes("so'z o'chirish") || text.includes("удалить слово") || text.includes("remove keyword")) {
+            const keywords = getKeywords(userId);
+            if (keywords.length === 0) {
+                await bot.sendMessage(userId, t(lang, 'keywords_empty'), { parse_mode: 'HTML' });
+                return;
+            }
+            const buttons = keywords.map(k => ([
+                { text: `🗑 ${k}`, callback_data: `kw_del_${encodeURIComponent(k)}` }
+            ]));
+            await bot.sendMessage(userId, t(lang, 'prompt_del_keyword'), {
+                parse_mode: 'HTML',
+                reply_markup: { inline_keyboard: buttons }
+            });
+            return;
+        }
 
-    // Noma'lum buyruqlar
-    await reply("❓ <b>Noma'lum buyruq yoki matn.</b>\nIltimos, pastdagi tugmalardan foydalaning.");
-}
+        // 5. Kanal qo'shish / o'chirish
+        if (text.includes("kanal qo'shish") || text.includes("kanal o'chirish")) {
+            await bot.sendMessage(userId, `ℹ️ <b>Kanal nazorati haqida:</b>\n\nSiz Telegram hisobingizni ulaganingizda (/login), tizim siz a'zo bo'lgan <b>barcha ochiq va yopiq kanallarni</b>, guruhlarni avtomatik ravishda to'g'ridan-to'g'ri kuzatadi.\n\nSiz yangi kanalga a'zo bo'lsangiz — bot uni o'z-o'zidan darhol kuzatishni boshlaydi!`, {
+                parse_mode: 'HTML'
+            });
+            return;
+        }
 
-// Inline tugmalar (Callback Query) amallari
-async function handleCallbackQuery(query) {
-    const data = query.data;
-    const queryId = query.id;
-    const message = query.message;
-    const messageId = message ? message.message_id : null;
+        // 6. Yangi kanallarni qidirish
+        if (text.includes("yangi kanallarni qidirish") || text.includes("avto-kanal") || text.includes("aqlli analiz")) {
+            await bot.sendMessage(userId, `🔍 <b>Avtomatik kanallar monitoringi faol!</b>\n\nSiz a'zo bo'lgan barcha kanallardagi xabarlar real-time rejimida o'qilib, kalit so'zlaringizga mos ish e'lonlari darhol shu yerga yuboriladi.\n\nKalit so'zlarni ko'rish yoki yangilash uchun: /keywords`, {
+                parse_mode: 'HTML'
+            });
+            return;
+        }
 
-    if (!data) return;
+        // 7. Stop-so'zlar
+        if (text === "🛑 Stop-so'zlar" || text === "🛑 Stop-words" || text.includes("stop-so'z")) {
+            await handleStopWordsCommand(bot, msg);
+            return;
+        }
 
-    // 1. ⭐ Saqlash
-    if (data.startsWith('save_')) {
-        const vacancyId = data.replace('save_', '');
-        const vacancy = recentVacancies.get(vacancyId);
+        // 8. Saqlanganlar
+        if (text === "⭐ Saqlanganlar" || text === "⭐ Saved" || text.includes("saqlangan postlar")) {
+            await showSavedVacancies(userId, 0);
+            return;
+        }
 
-        if (vacancy) {
-            if (vacancy.saved) {
-                await request('answerCallbackQuery', {
-                    callback_query_id: queryId,
-                    text: "ℹ️ Bu vakansiya allaqachon saqlangan!",
-                    show_alert: false
-                });
+        // 9. Til tanlash
+        if (text === "🌐 Til / Language" || text === "🌐 Til" || text === "🌐 Language") {
+            await handleLanguageCommand(bot, msg);
+            return;
+        }
+
+        // 10. Yordam
+        if (text === "📖 Yordam" || text === "📖 Help") {
+            await bot.sendMessage(userId, t(lang, 'help_text'), { parse_mode: 'HTML' });
+            return;
+        }
+
+        // 11. Klaviaturani yashirish
+        if (text === "/hide_keyboard" || text === "❌ Klaviaturani yopish") {
+            await bot.sendMessage(userId, "✅ Pastdagi klaviatura yopildi. Barcha buyruqlarni chapdagi ko'k <b>Menu</b> tugmasi orqali boshqarishingiz mumkin!", {
+                parse_mode: 'HTML',
+                reply_markup: { remove_keyboard: true }
+            });
+            return;
+        }
+
+        // Agar hech biriga tushmasa
+        await bot.sendMessage(userId, t(lang, 'unknown_command'), { parse_mode: 'HTML' });
+    });
+
+    // ---------------------------------------------------------
+    // 3. INLINE TUGMALAR (CALLBACK QUERY ROUTING)
+    // ---------------------------------------------------------
+
+    bot.on('callback_query', async (query) => {
+        const userId = query.from.id;
+        const data = query.data;
+        if (!data) return;
+
+        try {
+            // 0. Bosh menyu inline tugmalari
+            if (data.startsWith('menu_')) {
+                await bot.answerCallbackQuery(query.id);
+                const user = getUser(userId);
+                const lang = user?.language || 'uz';
+
+                if (data === 'menu_status') {
+                    if (!checkUserLoggedIn(userId, lang)) return;
+                    await showUserStatus(userId);
+                } else if (data === 'menu_keywords') {
+                    if (!checkUserLoggedIn(userId, lang)) return;
+                    await handleKeywordsCommand(bot, { from: { id: userId } });
+                } else if (data === 'menu_saved') {
+                    if (!checkUserLoggedIn(userId, lang)) return;
+                    await showSavedVacancies(userId, 0);
+                } else if (data === 'menu_stopwords') {
+                    if (!checkUserLoggedIn(userId, lang)) return;
+                    await handleStopWordsCommand(bot, { from: { id: userId } });
+                } else if (data === 'menu_language') {
+                    await handleLanguageCommand(bot, { from: { id: userId } });
+                } else if (data === 'menu_help') {
+                    await bot.sendMessage(userId, t(lang, 'help_text'), { parse_mode: 'HTML' });
+                }
                 return;
             }
 
-            await storage.addSavedVacancy(vacancy);
-            vacancy.saved = true;
-
-            await request('answerCallbackQuery', {
-                callback_query_id: queryId,
-                text: "⭐ Vakansiya saqlanganlar ro'yxatiga qo'shildi!",
-                show_alert: false
-            });
-
-            // Tugmani yangilaymiz: "⭐ Saqlash" -> "✅ Saqlandi"
-            if (message && message.reply_markup && message.reply_markup.inline_keyboard) {
-                const newKeyboard = message.reply_markup.inline_keyboard.map(row => 
-                    row.map(btn => {
-                        if (btn.callback_data === data) {
-                            return { text: "✅ Saqlandi", callback_data: `already_saved` };
-                        }
-                        return btn;
-                    })
-                );
-                await request('editMessageReplyMarkup', {
-                    chat_id: MY_CHAT_ID,
-                    message_id: messageId,
-                    reply_markup: { inline_keyboard: newKeyboard }
-                });
+            // 1. Til tanlash
+            if (data.startsWith('lang_')) {
+                await handleLanguageCallback(bot, query);
+                return;
             }
-        } else {
-            await request('answerCallbackQuery', {
-                callback_query_id: queryId,
-                text: "⭐ Vakansiya saqlanganlar ro'yxatiga qo'shildi!",
-                show_alert: false
-            });
-        }
-        return;
-    }
 
-    if (data === 'already_saved') {
-        await request('answerCallbackQuery', {
-            callback_query_id: queryId,
-            text: "✅ Ushbu vakansiya allaqachon saqlangan!",
-            show_alert: false
-        });
-        return;
-    }
-
-    // 2. 🚫 Kanalni o'chirish
-    if (data.startsWith('delch_')) {
-        const vacancyId = data.replace('delch_', '');
-        const vacancy = recentVacancies.get(vacancyId);
-
-        if (vacancy) {
-            const channelId = vacancy.channelIdentifier;
-            const removed = await storage.delChannel(channelId);
-            vacancy.channelDeleted = true;
-
-            const alertText = removed
-                ? `🚫 ${channelId} kanali kuzatuv ro'yxatidan o'chirildi!`
-                : `ℹ️ ${channelId} allaqachon kuzatuv ro'yxatida yo'q.`;
-
-            await request('answerCallbackQuery', {
-                callback_query_id: queryId,
-                text: alertText,
-                show_alert: true
-            });
-
-            // Tugmani yangilaymiz: "🚫 Kanalni o'chirish" -> "❌ O'chirildi"
-            if (message && message.reply_markup && message.reply_markup.inline_keyboard) {
-                const newKeyboard = message.reply_markup.inline_keyboard.map(row => 
-                    row.map(btn => {
-                        if (btn.callback_data === data) {
-                            return { text: "❌ O'chirildi", callback_data: `already_del` };
-                        }
-                        return btn;
-                    })
-                );
-                await request('editMessageReplyMarkup', {
-                    chat_id: MY_CHAT_ID,
-                    message_id: messageId,
-                    reply_markup: { inline_keyboard: newKeyboard }
-                });
+            // 2. Kalit so'zlar / Stop-so'zlar
+            if (data.startsWith('kw_') || data.startsWith('sw_')) {
+                await handleKeywordCallback(bot, query);
+                return;
             }
-        } else {
-            await request('answerCallbackQuery', {
-                callback_query_id: queryId,
-                text: "ℹ️ Kanal allaqachon o'chirilgan yoki topilmadi.",
-                show_alert: true
-            });
+
+            // 3. Login / Logout
+            if (data.startsWith('auth_')) {
+                await handleAuthCallback(bot, query);
+                return;
+            }
+
+            // 4. Vakansiyani saqlash (⭐ Saqlash)
+            if (data.startsWith('save_vac_')) {
+                const vacId = data.replace('save_vac_', '');
+                const user = getUser(userId);
+                const lang = user?.language || 'uz';
+
+                if (isVacancySaved(userId, vacId)) {
+                    await bot.answerCallbackQuery(query.id, {
+                        text: t(lang, 'alert_already_saved'),
+                        show_alert: false
+                    });
+                    return;
+                }
+
+                const vacData = memoryVacancies.get(vacId);
+                if (vacData) {
+                    saveVacancy(userId, vacData);
+                    await bot.answerCallbackQuery(query.id, {
+                        text: t(lang, 'alert_saved_success'),
+                        show_alert: false
+                    });
+
+                    // Tugmani yangilaymiz: ⭐ Saqlash -> ✅ Saqlandi
+                    if (query.message && query.message.reply_markup) {
+                        const newKeyboard = query.message.reply_markup.inline_keyboard.map(row =>
+                            row.map(btn => {
+                                if (btn.callback_data === data) {
+                                    return { text: t(lang, 'btn_saved_done'), callback_data: 'noop' };
+                                }
+                                return btn;
+                            })
+                        );
+                        await bot.editMessageReplyMarkup(
+                            { inline_keyboard: newKeyboard },
+                            { chat_id: userId, message_id: query.message.message_id }
+                        ).catch(() => {});
+                    }
+                } else {
+                    await bot.answerCallbackQuery(query.id, {
+                        text: t(lang, 'alert_saved_success'),
+                        show_alert: false
+                    });
+                }
+                return;
+            }
+
+            // 5. Saqlanganlar sahifalash va o'chirish
+            if (data.startsWith('saved_page_')) {
+                const page = parseInt(data.replace('saved_page_', ''), 10) || 0;
+                await bot.answerCallbackQuery(query.id);
+                await showSavedVacancies(userId, page, query.message.message_id);
+                return;
+            }
+
+            if (data.startsWith('delsaved_')) {
+                const id = data.replace('delsaved_', '');
+                const user = getUser(userId);
+                const lang = user?.language || 'uz';
+
+                deleteSavedVacancy(userId, id);
+                await bot.answerCallbackQuery(query.id, {
+                    text: t(lang, 'alert_deleted_saved'),
+                    show_alert: false
+                });
+
+                await showSavedVacancies(userId, 0, query.message.message_id);
+                return;
+            }
+
+            if (data === 'clear_all_saved') {
+                const user = getUser(userId);
+                const lang = user?.language || 'uz';
+
+                clearSavedVacancies(userId);
+                await bot.answerCallbackQuery(query.id, {
+                    text: t(lang, 'alert_all_saved_cleared'),
+                    show_alert: true
+                });
+
+                await showSavedVacancies(userId, 0, query.message.message_id);
+                return;
+            }
+
+            if (data === 'noop') {
+                await bot.answerCallbackQuery(query.id);
+                return;
+            }
+
+            await bot.answerCallbackQuery(query.id);
+        } catch (err) {
+            logger.error('BOT_CALLBACK', `Callback query xatosi: ${err.message}`);
         }
-        return;
-    }
-
-    if (data === 'already_del') {
-        await request('answerCallbackQuery', {
-            callback_query_id: queryId,
-            text: "ℹ️ Bu kanal allaqachon kuzatuvdan o'chirilgan!",
-            show_alert: false
-        });
-        return;
-    }
-
-    // 3. ⭐ Saqlangan postlarni ko'rish
-    if (data === 'view_saved') {
-        await request('answerCallbackQuery', { callback_query_id: queryId });
-        await showSavedVacancies(0);
-        return;
-    }
-
-    // 4. Sahifalash (Pagination)
-    if (data.startsWith('saved_page_')) {
-        const page = parseInt(data.replace('saved_page_', '')) || 0;
-        await request('answerCallbackQuery', { callback_query_id: queryId });
-        await showSavedVacancies(page, messageId);
-        return;
-    }
-
-    // 5. Saqlanganlardan bitta postni o'chirish
-    if (data.startsWith('delsaved_')) {
-        const id = data.replace('delsaved_', '');
-        await storage.removeSavedVacancy(id);
-        await request('answerCallbackQuery', {
-            callback_query_id: queryId,
-            text: "🗑 Post saqlanganlardan o'chirildi!",
-            show_alert: false
-        });
-        await showSavedVacancies(0, messageId);
-        return;
-    }
-
-    // 6. Barcha saqlanganlarni tozalash
-    if (data === 'clear_all_saved') {
-        const storeData = await storage.read();
-        storeData.savedVacancies = [];
-        await storage.write(storeData);
-        await request('answerCallbackQuery', {
-            callback_query_id: queryId,
-            text: "🗑 Barcha saqlangan postlar tozalandi!",
-            show_alert: true
-        });
-        await showSavedVacancies(0, messageId);
-        return;
-    }
-
-    await request('answerCallbackQuery', { callback_query_id: queryId });
+    });
 }
 
-// Saqlangan vakansiyalarni ko'rsatish funksiyasi
-async function showSavedVacancies(page = 0, editMessageId = null) {
-    const saved = await storage.getSavedVacancies();
-    if (saved.length === 0) {
-        const emptyMsg = "⭐ <b>Saqlangan postlar hozircha bo'sh.</b>\n\nYangi vakansiya kelganida xabar ostidagi <b>⭐ Saqlash</b> tugmasini bossangiz, postlar shu yerda saqlanadi!";
+// -------------------------------------------------------------
+// STATUS FUNKSIYASI
+// -------------------------------------------------------------
+
+async function showUserStatus(userId) {
+    const user = getUser(userId);
+    const lang = user?.language || 'uz';
+
+    const keywords = getKeywords(userId);
+    const stopWords = getStopWords(userId);
+    const savedCount = getSavedVacanciesCount(userId);
+    const isActive = isUserSessionActive(userId);
+
+    let text = t(lang, 'status_title') + '\n\n';
+    text += `👤 <b>ID:</b> <code>${userId}</code>\n`;
+    text += t(lang, 'status_phone', { phone: user?.phone || '—' }) + '\n';
+    text += `🟢 <b>Monitoring:</b> ${isActive ? t(lang, 'session_active') : t(lang, 'session_inactive')}\n\n`;
+    text += t(lang, 'status_keywords_count', { count: keywords.length }) + '\n';
+    text += t(lang, 'status_stopwords_count', { count: stopWords.length }) + '\n';
+    text += t(lang, 'status_saved_count', { count: savedCount }) + '\n';
+
+    const inline_keyboard = [];
+    if (!isActive) {
+        inline_keyboard.push([{ text: t(lang, 'login_btn'), callback_data: 'auth_login' }]);
+    } else {
+        inline_keyboard.push([{ text: t(lang, 'logout_btn'), callback_data: 'auth_logout_confirm' }]);
+    }
+
+    await bot.sendMessage(userId, text, {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard }
+    });
+}
+
+// -------------------------------------------------------------
+// SAQLANGAN VAKANSIYALAR RO'YXATI VA SAHIFALASH
+// -------------------------------------------------------------
+
+async function showSavedVacancies(userId, page = 0, editMessageId = null) {
+    const user = getUser(userId);
+    const lang = user?.language || 'uz';
+
+    const totalCount = getSavedVacanciesCount(userId);
+    if (totalCount === 0) {
+        const emptyMsg = t(lang, 'saved_empty');
         if (editMessageId) {
-            await request('editMessageText', {
-                chat_id: MY_CHAT_ID,
+            await bot.editMessageText(emptyMsg, {
+                chat_id: userId,
                 message_id: editMessageId,
-                text: emptyMsg,
                 parse_mode: 'HTML'
-            });
+            }).catch(() => {});
         } else {
-            await request('sendMessage', {
-                chat_id: MY_CHAT_ID,
-                text: emptyMsg,
-                parse_mode: 'HTML',
-                reply_markup: MAIN_KEYBOARD
-            });
+            await bot.sendMessage(userId, emptyMsg, { parse_mode: 'HTML' });
         }
         return;
     }
 
-    const pageSize = 5;
-    const totalPages = Math.ceil(saved.length / pageSize);
+    const pageSize = 4;
+    const totalPages = Math.ceil(totalCount / pageSize);
     const currentPage = Math.min(Math.max(0, page), totalPages - 1);
-    const startIdx = currentPage * pageSize;
-    const pageItems = saved.slice(startIdx, startIdx + pageSize);
+    const offset = currentPage * pageSize;
 
-    let msg = `⭐ <b>Saqlangan postlar (${saved.length} ta) — [${currentPage + 1}/${totalPages}-sahifa]:</b>\n\n`;
+    const items = getSavedVacancies(userId, pageSize, offset);
+
+    let msg = t(lang, 'saved_title', { count: totalCount }) + ` [${currentPage + 1}/${totalPages}]:\n\n`;
     const inline_keyboard = [];
 
-    pageItems.forEach((v, idx) => {
-        const num = startIdx + idx + 1;
-        const ch = escapeHtml(v.channelName || v.channelIdentifier || 'Kanal');
-        const snippet = escapeHtml((v.text || '').substring(0, 140).replace(/\s+/g, ' '));
+    items.forEach((v, idx) => {
+        const num = offset + idx + 1;
+        const channel = escapeHtml(v.channel_name || v.channel_id || 'Kanal');
+        const snippet = escapeHtml((v.text || '').substring(0, 120).replace(/\s+/g, ' '));
 
-        let extra = "";
-        const contacts = v.contacts || extractContacts(v.text, v.channelIdentifier);
-        const contactList = [...(contacts.telegram || []), ...(contacts.phones || [])];
-        if (contactList.length > 0) {
-            extra += `📞 <i>${escapeHtml(contactList.slice(0, 2).join(' | '))}</i>\n`;
-        }
-
-        msg += `<b>${num}. 📌 ${ch}</b>\n${snippet}...\n${extra}📅 <i>${v.savedAt || ''}</i>\n\n`;
+        msg += `<b>${num}. 📌 ${channel}</b>\n${snippet}...\n📅 <i>${v.saved_at}</i>\n\n`;
 
         const row = [];
         if (v.link && v.link.startsWith('http')) {
-            row.push({ text: `🔗 ${num}-post`, url: v.link });
+            row.push({ text: `🔗 #${num}`, url: v.link });
         }
-        row.push({ text: `🗑 ${num}-o'chirish`, callback_data: `delsaved_${v.id}` });
+        row.push({ text: `🗑 #${num}`, callback_data: `delsaved_${v.id}` });
         inline_keyboard.push(row);
     });
 
     const navRow = [];
     if (currentPage > 0) {
-        navRow.push({ text: "⬅️ Oldingi", callback_data: `saved_page_${currentPage - 1}` });
+        navRow.push({ text: t(lang, 'btn_prev_page'), callback_data: `saved_page_${currentPage - 1}` });
     }
     if (currentPage < totalPages - 1) {
-        navRow.push({ text: "Keyingi ➡️", callback_data: `saved_page_${currentPage + 1}` });
+        navRow.push({ text: t(lang, 'btn_next_page'), callback_data: `saved_page_${currentPage + 1}` });
     }
     if (navRow.length > 0) {
         inline_keyboard.push(navRow);
     }
 
     inline_keyboard.push([
-        { text: "🗑 Barchasini tozalash", callback_data: "clear_all_saved" }
+        { text: t(lang, 'btn_clear_all_saved'), callback_data: 'clear_all_saved' }
     ]);
 
     if (editMessageId) {
-        await request('editMessageText', {
-            chat_id: MY_CHAT_ID,
+        await bot.editMessageText(msg, {
+            chat_id: userId,
             message_id: editMessageId,
-            text: msg,
             parse_mode: 'HTML',
             disable_web_page_preview: true,
             reply_markup: { inline_keyboard }
-        });
+        }).catch(() => {});
     } else {
-        await request('sendMessage', {
-            chat_id: MY_CHAT_ID,
-            text: msg,
+        await bot.sendMessage(userId, msg, {
             parse_mode: 'HTML',
             disable_web_page_preview: true,
             reply_markup: { inline_keyboard }
@@ -600,4 +603,58 @@ async function showSavedVacancies(page = 0, editMessageId = null) {
     }
 }
 
+// -------------------------------------------------------------
+// VAKANSIYA BILDIRISHNOMASINI YUBORISH (SEND VACANCY ALERT)
+// -------------------------------------------------------------
 
+export async function sendVacancyAlert({
+    userId,
+    channelName,
+    cleanText,
+    formattedText,
+    link,
+    channelIdentifier,
+    matchedKeywords,
+    contacts,
+    userLang
+}) {
+    if (!bot) return;
+
+    const uniqueId = 'v_' + Math.random().toString(36).substring(2, 9);
+    
+    memoryVacancies.set(uniqueId, {
+        id: uniqueId,
+        channelName,
+        text: cleanText,
+        link,
+        channelIdentifier,
+        matchedKeywords,
+        contacts
+    });
+
+    // AlwaysData RAM tejash: xotira to'lib ketmasligi uchun 500 tadan oshganda eskisini o'chirish
+    if (memoryVacancies.size > 500) {
+        const firstKey = memoryVacancies.keys().next().value;
+        memoryVacancies.delete(firstKey);
+    }
+
+    const inline_keyboard = [
+        [
+            { text: t(userLang, 'btn_save'), callback_data: `save_vac_${uniqueId}` }
+        ]
+    ];
+
+    if (link && link.startsWith('http')) {
+        inline_keyboard[0].push({ text: t(userLang, 'btn_original_post'), url: link });
+    }
+
+    try {
+        await bot.sendMessage(userId, formattedText, {
+            parse_mode: 'HTML',
+            disable_web_page_preview: true,
+            reply_markup: { inline_keyboard }
+        });
+    } catch (err) {
+        logger.error('BOT_ALERT', `User ${userId} ga alert jo'natishda xato: ${err.message}`);
+    }
+}
