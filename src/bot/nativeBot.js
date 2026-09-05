@@ -151,7 +151,7 @@ let userState = null;
 
 const MAIN_KEYBOARD = {
     keyboard: [
-        [{ text: "📊 Mening Sozlamalarim" }, { text: "⭐ Saqlanganlar" }],
+        [{ text: "📊 Mening Sozlamalarim" }, { text: "⭐ Saqlangan postlar" }],
         [{ text: "➕ So'z qo'shish" }, { text: "➖ So'z o'chirish" }],
         [{ text: "➕ Kanal qo'shish" }, { text: "➖ Kanal o'chirish" }],
         [{ text: "🛑 Stop-so'z qo'shish" }, { text: "🗑 Stop-so'z o'chirish" }],
@@ -191,29 +191,23 @@ async function handleCommand(message) {
         const swList = (data.stopWords && data.stopWords.length > 0) ? data.stopWords.map(s => `🛑 <code>${escapeHtml(s)}</code>`).join('\n') : "<i>Hozircha bo'sh</i>";
         const chList = data.channels.length > 0 ? data.channels.map(c => `🔹 ${escapeHtml(c)}`).join('\n') : "<i>Hozircha bo'sh</i>";
         const savedCount = (data.savedVacancies && data.savedVacancies.length) || 0;
-        await reply(`📊 <b>Sizning sozlamalaringiz:</b>\n\n🔑 <b>Kalit so'zlar (${data.keywords.length}):</b>\n${kwList}\n\n🛑 <b>Stop-so'zlar / Anti-CV (${data.stopWords ? data.stopWords.length : 0}):</b>\n${swList}\n\n📢 <b>Kuzatilayotgan Kanallar (${data.channels.length}):</b>\n${chList}\n\n⭐ <b>Saqlangan vakansiyalar soni:</b> ${savedCount} ta`);
+        
+        await request('sendMessage', {
+            chat_id: MY_CHAT_ID,
+            text: `📊 <b>Sizning sozlamalaringiz:</b>\n\n🔑 <b>Kalit so'zlar (${data.keywords.length}):</b>\n${kwList}\n\n🛑 <b>Stop-so'zlar / Anti-CV (${data.stopWords ? data.stopWords.length : 0}):</b>\n${swList}\n\n📢 <b>Kuzatilayotgan Kanallar (${data.channels.length}):</b>\n${chList}\n\n⭐ <b>Saqlangan postlar soni:</b> ${savedCount} ta`,
+            parse_mode: 'HTML',
+            reply_markup: {
+                inline_keyboard: [
+                    [{ text: `⭐ Saqlangan postlarni ko'rish (${savedCount})`, callback_data: 'view_saved' }]
+                ]
+            }
+        });
         return;
     }
 
-    if (text === '⭐ Saqlanganlar' || text === '⭐ Saqlangan Vakansiyalar' || text === '/saved') {
+    if (text === '⭐ Saqlangan postlar' || text === '⭐ Saqlanganlar' || text === '⭐ Saqlangan Vakansiyalar' || text === '/saved' || text === 'saqlangan postlar') {
         userState = null;
-        const saved = await storage.getSavedVacancies();
-        if (saved.length === 0) {
-            await reply("⭐ <b>Saqlangan vakansiyalar hozircha mavjud emas.</b>\n\nYangi vakansiya kelganda uning ostidagi <b>⭐ Saqlash</b> tugmasini bossangiz, shu yerda ro'yxatga tushadi.");
-            return;
-        }
-
-        let msg = `⭐ <b>Saqlangan Vakansiyalar (${saved.length} ta):</b>\n\n`;
-        saved.slice(0, 10).forEach((v, idx) => {
-            const ch = escapeHtml(v.channelName || v.channelIdentifier || 'Kanal');
-            const snippet = escapeHtml((v.text || '').substring(0, 120).replace(/\n+/g, ' '));
-            const linkStr = v.link ? `👉 <a href="${v.link}">Asl postga o'tish</a>` : '';
-            msg += `<b>${idx + 1}. 📌 ${ch}</b>\n<i>${snippet}...</i>\n${linkStr}\n📅 <i>${v.savedAt || ''}</i>\n\n`;
-        });
-        if (saved.length > 10) {
-            msg += `<i>...va yana ${saved.length - 10} ta vakansiya mavjud.</i>`;
-        }
-        await reply(msg);
+        await showSavedVacancies(0);
         return;
     }
 
@@ -459,6 +453,130 @@ async function handleCallbackQuery(query) {
         return;
     }
 
+    // 3. ⭐ Saqlangan postlarni ko'rish
+    if (data === 'view_saved') {
+        await request('answerCallbackQuery', { callback_query_id: queryId });
+        await showSavedVacancies(0);
+        return;
+    }
+
+    // 4. Sahifalash (Pagination)
+    if (data.startsWith('saved_page_')) {
+        const page = parseInt(data.replace('saved_page_', '')) || 0;
+        await request('answerCallbackQuery', { callback_query_id: queryId });
+        await showSavedVacancies(page, messageId);
+        return;
+    }
+
+    // 5. Saqlanganlardan bitta postni o'chirish
+    if (data.startsWith('delsaved_')) {
+        const id = data.replace('delsaved_', '');
+        await storage.removeSavedVacancy(id);
+        await request('answerCallbackQuery', {
+            callback_query_id: queryId,
+            text: "🗑 Post saqlanganlardan o'chirildi!",
+            show_alert: false
+        });
+        await showSavedVacancies(0, messageId);
+        return;
+    }
+
+    // 6. Barcha saqlanganlarni tozalash
+    if (data === 'clear_all_saved') {
+        const storeData = await storage.read();
+        storeData.savedVacancies = [];
+        await storage.write(storeData);
+        await request('answerCallbackQuery', {
+            callback_query_id: queryId,
+            text: "🗑 Barcha saqlangan postlar tozalandi!",
+            show_alert: true
+        });
+        await showSavedVacancies(0, messageId);
+        return;
+    }
+
     await request('answerCallbackQuery', { callback_query_id: queryId });
 }
+
+// Saqlangan vakansiyalarni ko'rsatish funksiyasi
+async function showSavedVacancies(page = 0, editMessageId = null) {
+    const saved = await storage.getSavedVacancies();
+    if (saved.length === 0) {
+        const emptyMsg = "⭐ <b>Saqlangan postlar hozircha bo'sh.</b>\n\nYangi vakansiya kelganida xabar ostidagi <b>⭐ Saqlash</b> tugmasini bossangiz, postlar shu yerda saqlanadi!";
+        if (editMessageId) {
+            await request('editMessageText', {
+                chat_id: MY_CHAT_ID,
+                message_id: editMessageId,
+                text: emptyMsg,
+                parse_mode: 'HTML'
+            });
+        } else {
+            await request('sendMessage', {
+                chat_id: MY_CHAT_ID,
+                text: emptyMsg,
+                parse_mode: 'HTML',
+                reply_markup: MAIN_KEYBOARD
+            });
+        }
+        return;
+    }
+
+    const pageSize = 5;
+    const totalPages = Math.ceil(saved.length / pageSize);
+    const currentPage = Math.min(Math.max(0, page), totalPages - 1);
+    const startIdx = currentPage * pageSize;
+    const pageItems = saved.slice(startIdx, startIdx + pageSize);
+
+    let msg = `⭐ <b>Saqlangan postlar (${saved.length} ta) — [${currentPage + 1}/${totalPages}-sahifa]:</b>\n\n`;
+    const inline_keyboard = [];
+
+    pageItems.forEach((v, idx) => {
+        const num = startIdx + idx + 1;
+        const ch = escapeHtml(v.channelName || v.channelIdentifier || 'Kanal');
+        const snippet = escapeHtml((v.text || '').substring(0, 140).replace(/\s+/g, ' '));
+        msg += `<b>${num}. 📌 ${ch}</b>\n${snippet}...\n📅 <i>${v.savedAt || ''}</i>\n\n`;
+
+        const row = [];
+        if (v.link && v.link.startsWith('http')) {
+            row.push({ text: `🔗 ${num}-post`, url: v.link });
+        }
+        row.push({ text: `🗑 ${num}-o'chirish`, callback_data: `delsaved_${v.id}` });
+        inline_keyboard.push(row);
+    });
+
+    const navRow = [];
+    if (currentPage > 0) {
+        navRow.push({ text: "⬅️ Oldingi", callback_data: `saved_page_${currentPage - 1}` });
+    }
+    if (currentPage < totalPages - 1) {
+        navRow.push({ text: "Keyingi ➡️", callback_data: `saved_page_${currentPage + 1}` });
+    }
+    if (navRow.length > 0) {
+        inline_keyboard.push(navRow);
+    }
+
+    inline_keyboard.push([
+        { text: "🗑 Barchasini tozalash", callback_data: "clear_all_saved" }
+    ]);
+
+    if (editMessageId) {
+        await request('editMessageText', {
+            chat_id: MY_CHAT_ID,
+            message_id: editMessageId,
+            text: msg,
+            parse_mode: 'HTML',
+            disable_web_page_preview: true,
+            reply_markup: { inline_keyboard }
+        });
+    } else {
+        await request('sendMessage', {
+            chat_id: MY_CHAT_ID,
+            text: msg,
+            parse_mode: 'HTML',
+            disable_web_page_preview: true,
+            reply_markup: { inline_keyboard }
+        });
+    }
+}
+
 
