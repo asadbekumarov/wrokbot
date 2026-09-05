@@ -21,15 +21,21 @@ export const storage = {
                         "#xodim",
                         "#rezyume",
                         "#cv",
+                        "rezyume",
+                        "cv",
+                        "резюме",
                         "ish joyi kerak",
-                        "ish joyi kerak:",
+                        "ish qidir",
                         "ish qidiryapti",
                         "ish qidirmoqdaman",
                         "ish qidiryapman",
+                        "loyiha qidir",
+                        "tajribaga egaman",
+                        "tajribam bor",
                         "xodim:",
-                        "резюме",
                         "ищу работу"
-                    ] 
+                    ]
+ 
                 };
                 await this.write(defaultData);
                 return defaultData;

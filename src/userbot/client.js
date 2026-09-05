@@ -5,6 +5,7 @@ import * as readline from 'readline/promises';
 import { stdin as input, stdout as output } from 'process';
 import { storage } from '../utils/storage.js';
 import { sendAlert } from '../bot/nativeBot.js';
+import { checkAntiCvStopWords } from '../utils/filter.js';
 
 let globalClient = null;
 
@@ -53,11 +54,12 @@ export async function deepScanAndAddChannels(keywordsArray) {
                     try {
                         const messages = await globalClient.getMessages(dialog.entity, { limit: 15 });
                         const storageData = await storage.read();
-                        const stopWords = storageData.stopWords || [];
                         for (const msg of messages) {
-                            const text = (msg.message || msg.text || '').toLowerCase();
-                            const hasStopWord = stopWords.some(sw => sw && text.includes(sw.toLowerCase()));
-                            if (text && !hasStopWord && keywordsArray.some(kw => text.includes(kw))) {
+                            const rawMsg = msg.message || msg.text || '';
+                            if (!rawMsg) continue;
+                            const isStopWord = checkAntiCvStopWords(rawMsg, storageData.stopWords || []);
+                            const lowerMsg = rawMsg.toLowerCase();
+                            if (!isStopWord && keywordsArray.some(kw => lowerMsg.includes(kw))) {
                                 matches = true;
                                 break;
                             }
@@ -135,11 +137,10 @@ export async function startUserBot() {
             // Agar umuman kalit so'z topilmasa, to'xtaymiz
             if (!foundKeyword) return;
 
-            // Anti-CV va Stop-so'zlar filtri (Rezyume, ish qidiruvchilar xabarlarini rad etish)
-            const stopWords = data.stopWords || [];
-            const foundStopWord = stopWords.find(sw => sw && msgTextLower.includes(sw.toLowerCase()));
-            if (foundStopWord) {
-                console.log(`[UserBot] 🛑 Stop-so'z ('${foundStopWord}') aniqlandi (CV/Rezyume). Xabar rad etildi.`);
+            // Anti-CV va Stop-so'zlar filtri (Regex, case-insensitive, tinish belgilariga chidamli)
+            const matchedStopWord = checkAntiCvStopWords(msgText, data.stopWords || []);
+            if (matchedStopWord) {
+                console.log(`[UserBot] 🛑 Stop-so'z ('${matchedStopWord}') aniqlandi (CV/Rezyume). Xabar rad etildi.`);
                 return;
             }
 
