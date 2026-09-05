@@ -6,6 +6,7 @@ import { stdin as input, stdout as output } from 'process';
 import { storage } from '../utils/storage.js';
 import { sendAlert } from '../bot/nativeBot.js';
 import { checkAntiCvStopWords } from '../utils/filter.js';
+import { deduplicator } from '../utils/deduplicator.js';
 
 let globalClient = null;
 
@@ -162,6 +163,12 @@ export async function startUserBot() {
                 
                 // Egasi uchun kichik bildirishnoma yuborib qo'yamiz (optional, lekin yaxshi)
                 await sendAlert("🤖 Avto-Kashfiyot", `Yangi kanal bazangizga avtomatik qo'shildi!\nEndi bu kanal doimiy kuzatuvda bo'ladi.`, `https://t.me/${chat.username || 'c/'+chat.id}`);
+            }
+
+            // Dublikat xabarlarni filtrlash (oxirgi 1000 ta xabar xeshi bo'yicha)
+            if (deduplicator.isDuplicate(msgText)) {
+                console.log(`[UserBot] 🔁 Dublikat xabar aniqlandi (yuborilmadi). Kanal: ${channelIdStr}`);
+                return;
             }
 
             console.log(`[UserBot] Keyword '${foundKeyword}' topildi. Kanal: ${channelIdStr}`);
