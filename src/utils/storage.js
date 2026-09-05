@@ -7,10 +7,27 @@ export const storage = {
     async read() {
         try {
             const data = await fs.readFile(dataFile, 'utf-8');
-            return JSON.parse(data);
+            const parsed = JSON.parse(data);
+            if (!Array.isArray(parsed.keywords)) parsed.keywords = [];
+            if (!Array.isArray(parsed.channels)) parsed.channels = [];
+            if (!Array.isArray(parsed.stopWords)) parsed.stopWords = [];
+            return parsed;
         } catch (err) {
             if (err.code === 'ENOENT') {
-                const defaultData = { keywords: [], channels: [] };
+                const defaultData = { 
+                    keywords: [], 
+                    channels: [], 
+                    stopWords: [
+                        "#xodim",
+                        "#rezyume",
+                        "#cv",
+                        "ish qidiryapti",
+                        "ish qidirmoqdaman",
+                        "ish qidiryapman",
+                        "резюме",
+                        "ищу работу"
+                    ] 
+                };
                 await this.write(defaultData);
                 return defaultData;
             }
@@ -86,6 +103,30 @@ export const storage = {
         const initialLen = data.channels.length;
         data.channels = data.channels.filter(c => c.toLowerCase() !== norm.toLowerCase());
         if (data.channels.length !== initialLen) {
+            await this.write(data);
+            return true;
+        }
+        return false;
+    },
+
+    async addStopWord(word) {
+        const data = await this.read();
+        const sw = word.trim().toLowerCase();
+        if (!sw) return false;
+        if (!data.stopWords.includes(sw)) {
+            data.stopWords.push(sw);
+            await this.write(data);
+            return true;
+        }
+        return false;
+    },
+
+    async delStopWord(word) {
+        const data = await this.read();
+        const sw = word.trim().toLowerCase();
+        const initialLen = data.stopWords.length;
+        data.stopWords = data.stopWords.filter(s => s.toLowerCase() !== sw);
+        if (data.stopWords.length !== initialLen) {
             await this.write(data);
             return true;
         }

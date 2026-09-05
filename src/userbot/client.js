@@ -52,9 +52,12 @@ export async function deepScanAndAddChannels(keywordsArray) {
                 if (!matches) {
                     try {
                         const messages = await globalClient.getMessages(dialog.entity, { limit: 15 });
+                        const storageData = await storage.read();
+                        const stopWords = storageData.stopWords || [];
                         for (const msg of messages) {
                             const text = (msg.message || msg.text || '').toLowerCase();
-                            if (text && keywordsArray.some(kw => text.includes(kw))) {
+                            const hasStopWord = stopWords.some(sw => sw && text.includes(sw.toLowerCase()));
+                            if (text && !hasStopWord && keywordsArray.some(kw => text.includes(kw))) {
                                 matches = true;
                                 break;
                             }
@@ -131,6 +134,14 @@ export async function startUserBot() {
 
             // Agar umuman kalit so'z topilmasa, to'xtaymiz
             if (!foundKeyword) return;
+
+            // Anti-CV va Stop-so'zlar filtri (Rezyume, ish qidiruvchilar xabarlarini rad etish)
+            const stopWords = data.stopWords || [];
+            const foundStopWord = stopWords.find(sw => sw && msgTextLower.includes(sw.toLowerCase()));
+            if (foundStopWord) {
+                console.log(`[UserBot] 🛑 Stop-so'z ('${foundStopWord}') aniqlandi (CV/Rezyume). Xabar rad etildi.`);
+                return;
+            }
 
             let channelIdStr = chat.username ? `@${chat.username}` : chat.id.toString();
             

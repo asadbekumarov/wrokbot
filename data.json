@@ -47,5 +47,15 @@
   "channels": [
     "@testumarov",
     "@All_IT_chat"
+  ],
+  "stopWords": [
+    "#xodim",
+    "#rezyume",
+    "#cv",
+    "ish qidiryapti",
+    "ish qidirmoqdaman",
+    "ish qidiryapman",
+    "резюме",
+    "ищу работу"
   ]
 }

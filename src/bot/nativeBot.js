@@ -95,6 +95,7 @@ const MAIN_KEYBOARD = {
         [{ text: "📊 Mening Sozlamalarim" }],
         [{ text: "➕ So'z qo'shish" }, { text: "➖ So'z o'chirish" }],
         [{ text: "➕ Kanal qo'shish" }, { text: "➖ Kanal o'chirish" }],
+        [{ text: "🛑 Stop-so'z qo'shish" }, { text: "🗑 Stop-so'z o'chirish" }],
         [{ text: "🔍 Yangi kanallarni qidirish" }]
     ],
     resize_keyboard: true
@@ -127,9 +128,10 @@ async function handleCommand(message) {
     if (text === '📊 Mening Sozlamalarim' || text === '📊 Sozlamalar' || text === '/keywords') {
         userState = null;
         const data = await storage.read();
-        const kwList = data.keywords.length > 0 ? data.keywords.map(k => `🔸 <code>${k}</code>`).join('\n') : "<i>Hozircha bo'sh</i>";
-        const chList = data.channels.length > 0 ? data.channels.map(c => `🔹 ${c}`).join('\n') : "<i>Hozircha bo'sh</i>";
-        await reply(`📊 <b>Sizning sozlamalaringiz:</b>\n\n🔑 <b>Kalit so'zlar:</b>\n${kwList}\n\n📢 <b>Kuzatilayotgan Kanallar:</b>\n${chList}`);
+        const kwList = data.keywords.length > 0 ? data.keywords.map(k => `🔸 <code>${escapeHtml(k)}</code>`).join('\n') : "<i>Hozircha bo'sh</i>";
+        const swList = (data.stopWords && data.stopWords.length > 0) ? data.stopWords.map(s => `🛑 <code>${escapeHtml(s)}</code>`).join('\n') : "<i>Hozircha bo'sh</i>";
+        const chList = data.channels.length > 0 ? data.channels.map(c => `🔹 ${escapeHtml(c)}`).join('\n') : "<i>Hozircha bo'sh</i>";
+        await reply(`📊 <b>Sizning sozlamalaringiz:</b>\n\n🔑 <b>Kalit so'zlar (${data.keywords.length}):</b>\n${kwList}\n\n🛑 <b>Stop-so'zlar / Anti-CV (${data.stopWords ? data.stopWords.length : 0}):</b>\n${swList}\n\n📢 <b>Kuzatilayotgan Kanallar (${data.channels.length}):</b>\n${chList}`);
         return;
     }
 
@@ -154,6 +156,18 @@ async function handleCommand(message) {
     if (text === "➖ Kanal o'chirish") {
         userState = 'DEL_CHANNEL';
         await reply("🗑 <b>O'chirmoqchi bo'lgan kanalni yozing:</b>", CANCEL_KEYBOARD);
+        return;
+    }
+
+    if (text === "🛑 Stop-so'z qo'shish") {
+        userState = 'ADD_STOPWORD';
+        await reply("🛑 <b>Qo'shmoqchi bo'lgan stop-so'z yoki jumlani yozing:</b>\n<i>Misol: #rezyume yoki ish qidiryapti</i>", CANCEL_KEYBOARD);
+        return;
+    }
+
+    if (text === "🗑 Stop-so'z o'chirish") {
+        userState = 'DEL_STOPWORD';
+        await reply("🗑 <b>O'chirmoqchi bo'lgan stop-so'zni yozing:</b>", CANCEL_KEYBOARD);
         return;
     }
 
@@ -218,6 +232,20 @@ async function handleCommand(message) {
     if (userState === 'DEL_CHANNEL') {
         const cDel = await storage.delChannel(text);
         await reply(cDel ? `🗑 <b>Kanal o'chirildi:</b> ${text}` : `❌ <b>Topilmadi:</b> ${text}`, MAIN_KEYBOARD);
+        userState = null;
+        return;
+    }
+
+    if (userState === 'ADD_STOPWORD') {
+        const swAdded = await storage.addStopWord(text);
+        await reply(swAdded ? `✅ <b>Stop-so'z qo'shildi:</b> <code>${escapeHtml(text)}</code>` : `ℹ️ <b>Allaqachon mavjud:</b> <code>${escapeHtml(text)}</code>`, MAIN_KEYBOARD);
+        userState = null;
+        return;
+    }
+
+    if (userState === 'DEL_STOPWORD') {
+        const swDel = await storage.delStopWord(text);
+        await reply(swDel ? `🗑 <b>Stop-so'z o'chirildi:</b> <code>${escapeHtml(text)}</code>` : `❌ <b>Topilmadi:</b> <code>${escapeHtml(text)}</code>`, MAIN_KEYBOARD);
         userState = null;
         return;
     }
