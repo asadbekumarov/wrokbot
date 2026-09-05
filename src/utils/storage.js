@@ -21,9 +21,12 @@ export const storage = {
                         "#xodim",
                         "#rezyume",
                         "#cv",
+                        "ish joyi kerak",
+                        "ish joyi kerak:",
                         "ish qidiryapti",
                         "ish qidirmoqdaman",
                         "ish qidiryapman",
+                        "xodim:",
                         "резюме",
                         "ищу работу"
                     ] 
