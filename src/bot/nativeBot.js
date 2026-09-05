@@ -1,4 +1,5 @@
 import { storage } from '../utils/storage.js';
+import { formatVacancyAlert, escapeHtml, extractContacts } from '../utils/formatter.js';
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MY_CHAT_ID = process.env.MY_CHAT_ID;
@@ -19,19 +20,29 @@ async function request(method, payload = {}) {
     }
 }
 
-// Telegram uchun HTML maxsus belgilarini tozalash (parse_error'ni oldini oladi)
-function escapeHtml(text) {
-    if (!text) return "";
-    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
 // Oxirgi topilgan vakansiyalar xotirasi (Inline tugmalar uchun)
 export const recentVacancies = new Map();
 
 // UserBot topgan vakansiyani egasiga jo'natish funksiyasi
-export async function sendAlert(channelName, text, link, channelIdentifier = null) {
-    const escapedText = escapeHtml(text.substring(0, 3000)); // Limit qo'yamiz (3000 harf)
-    let msg = `🚨 <b>Yangi Vakansiya Topildi!</b>\n📌 <b>Kanal:</b> ${escapeHtml(channelName)}\n\n${escapedText}`;
+export async function sendAlert(channelName, text, link, channelIdentifier = null, matchedKeywords = []) {
+    let msg = "";
+    let cleanText = text;
+    let contacts = { telegram: [], phones: [], emails: [] };
+
+    if (channelIdentifier) {
+        const formatted = formatVacancyAlert({
+            channelName,
+            text,
+            link,
+            keywords: matchedKeywords,
+            channelIdentifier
+        });
+        msg = formatted.formattedText;
+        cleanText = formatted.cleanText;
+        contacts = formatted.contacts;
+    } else {
+        msg = `🚨 <b>${escapeHtml(channelName)}</b>\n\n${escapeHtml(text)}`;
+    }
     
     let reply_markup = undefined;
 
@@ -41,9 +52,11 @@ export async function sendAlert(channelName, text, link, channelIdentifier = nul
         recentVacancies.set(vacancyId, {
             id: vacancyId,
             channelName,
-            text,
+            text: cleanText,
             link,
             channelIdentifier,
+            matchedKeywords,
+            contacts,
             saved: false,
             channelDeleted: false
         });
@@ -534,7 +547,15 @@ async function showSavedVacancies(page = 0, editMessageId = null) {
         const num = startIdx + idx + 1;
         const ch = escapeHtml(v.channelName || v.channelIdentifier || 'Kanal');
         const snippet = escapeHtml((v.text || '').substring(0, 140).replace(/\s+/g, ' '));
-        msg += `<b>${num}. 📌 ${ch}</b>\n${snippet}...\n📅 <i>${v.savedAt || ''}</i>\n\n`;
+
+        let extra = "";
+        const contacts = v.contacts || extractContacts(v.text, v.channelIdentifier);
+        const contactList = [...(contacts.telegram || []), ...(contacts.phones || [])];
+        if (contactList.length > 0) {
+            extra += `📞 <i>${escapeHtml(contactList.slice(0, 2).join(' | '))}</i>\n`;
+        }
+
+        msg += `<b>${num}. 📌 ${ch}</b>\n${snippet}...\n${extra}📅 <i>${v.savedAt || ''}</i>\n\n`;
 
         const row = [];
         if (v.link && v.link.startsWith('http')) {

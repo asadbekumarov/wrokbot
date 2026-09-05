@@ -132,11 +132,15 @@ export async function startUserBot() {
             const msgTextLower = msgText.toLowerCase();
             const data = await storage.read();
             
-            // Xabarda biz izlayotgan kalit so'zlardan biri bormi?
-            const foundKeyword = data.keywords.find(kw => msgTextLower.includes(kw));
+            // Xabarda biz izlayotgan barcha kalit so'zlarni topamiz
+            const foundKeywords = (data.keywords || []).filter(kw => {
+                if (!kw || typeof kw !== 'string') return false;
+                const cleanKw = kw.trim().toLowerCase();
+                return cleanKw && msgTextLower.includes(cleanKw);
+            });
 
             // Agar umuman kalit so'z topilmasa, to'xtaymiz
-            if (!foundKeyword) return;
+            if (foundKeywords.length === 0) return;
 
             // Anti-CV va Stop-so'zlar filtri (Regex, case-insensitive, tinish belgilariga chidamli)
             const matchedStopWord = checkAntiCvStopWords(msgText, data.stopWords || []);
@@ -171,7 +175,7 @@ export async function startUserBot() {
                 return;
             }
 
-            console.log(`[UserBot] Keyword '${foundKeyword}' topildi. Kanal: ${channelIdStr}`);
+            console.log(`[UserBot] Keywords [${foundKeywords.join(', ')}] topildi. Kanal: ${channelIdStr}`);
             
             // Havolani (linkni) yig'amiz
                 let link = "";
@@ -184,7 +188,7 @@ export async function startUserBot() {
                 }
                 
                 const channelName = chat.title || channelIdStr;
-                await sendAlert(channelName, msgText, link, channelIdStr);
+                await sendAlert(channelName, msgText, link, channelIdStr, foundKeywords);
         } catch (error) {
             console.error("[UserBot] Xabarni qayta ishlashda xato:", error.message);
         }

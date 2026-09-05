@@ -154,6 +154,8 @@ export const storage = {
                 text: vacancy.text,
                 link: vacancy.link,
                 channelIdentifier: vacancy.channelIdentifier,
+                matchedKeywords: vacancy.matchedKeywords || [],
+                contacts: vacancy.contacts || null,
                 savedAt: new Date().toLocaleString('uz-UZ')
             });
             if (data.savedVacancies.length > 200) {
