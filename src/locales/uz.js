@@ -79,7 +79,7 @@ export default {
     text_truncated: "Xabar uzunligi sabab qisqartirildi",
     
     // Help & Common
-    help_text: "📖 <b>WorkBot Yordam:</b>\n\n/start - Botni ishga tushirish\n/login - Telegram hisobingizni ulash\n/logout - Hisobni uzish va to'xtatish\n/status - Hisob va monitoring holati\n/keywords - Kalit so'zlarni boshqarish\n/stopwords - Anti-CV stop-so'zlar\n/saved - Saqlangan vakansiyalar\n/language - Tilni o'zgartirish\n/help - Ushbu qo'llanma",
+    help_text: "📖 <b>WorkBot & AI Telegram Assistant Qo'llanmasi:</b>\n\n🧠 <b>AI va Saralash:</b>\n/profile - O'zingiz haqingizda kiritish, AI intervyu va qamrov\n/digest - Muhim xabarlar bo'yicha yig'ma AI Brifing (Smart Digest)\n/inbox - Saralangan muhim xabarlar qutisi\n/setgemini - Google Gemini API kalitini kiritish\n\n⚙️ <b>Asosiy Buyruqlar:</b>\n/login - Telegram hisobingizni ulash\n/status - Monitoring va hisob holati\n/keywords - Kalit so'zlar bo'yicha qidiruv\n/stopwords - Anti-CV va stop-so'zlar\n/saved - Saqlangan xabarlar\n/language - Tilni o'zgartirish\n/logout - Hisobni uzish\n/help - Ushbu qo'llanma",
     btn_back: "🔙 Orqaga",
     btn_cancel: "❌ Bekor qilish",
     btn_main_menu: "🏠 Bosh menyu",

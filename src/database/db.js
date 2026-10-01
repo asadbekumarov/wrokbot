@@ -96,6 +96,49 @@ export function initDatabase() {
             );
         `);
 
+        // 7. Shaxsiy profil va AI sozlamalari
+        db.exec(`
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                user_id INTEGER PRIMARY KEY,
+                profile_text TEXT DEFAULT '',
+                interview_step INTEGER DEFAULT 0,
+                interview_data TEXT DEFAULT '{}',
+                gemini_api_key TEXT DEFAULT NULL,
+                scope_channels INTEGER DEFAULT 1,
+                scope_groups INTEGER DEFAULT 1,
+                scope_dms INTEGER DEFAULT 1,
+                scope_bots INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY(user_id) REFERENCES users(telegram_id) ON DELETE CASCADE
+            );
+        `);
+
+        // 8. Gemini tomonidan tahlil qilingan saralangan xabarlar
+        db.exec(`
+            CREATE TABLE IF NOT EXISTS analyzed_messages (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                source_type TEXT NOT NULL,
+                source_name TEXT,
+                source_identifier TEXT,
+                message_id TEXT,
+                link TEXT,
+                original_text TEXT,
+                importance_score INTEGER DEFAULT 0,
+                is_urgent INTEGER DEFAULT 0,
+                category TEXT,
+                ai_summary TEXT,
+                ai_reasoning TEXT,
+                action_items TEXT,
+                is_read INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY(user_id) REFERENCES users(telegram_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_analyzed_user ON analyzed_messages(user_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_analyzed_unread ON analyzed_messages(user_id, is_read);
+        `);
+
         logger.info('DATABASE', 'SQLite (WAL) bazasi muvaffaqiyatli ishga tushirildi');
         migrateLegacyData();
         return db;
@@ -399,6 +442,170 @@ export function clearUserState(userId) {
     const database = getDb();
     database.prepare('DELETE FROM user_states WHERE user_id = ?').run(userId);
 }
+
+// -------------------------------------------------------------
+// USER PROFILE & AI SETTINGS OPERATIONS
+// -------------------------------------------------------------
+
+export function getUserProfile(userId) {
+    const database = getDb();
+    let row = database.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(userId);
+    if (!row) {
+        // Standart profil yaratish
+        database.prepare(`
+            INSERT INTO user_profiles (user_id, profile_text, interview_step, interview_data, scope_channels, scope_groups, scope_dms, scope_bots)
+            VALUES (?, '', 0, '{}', 1, 1, 1, 1)
+        `).run(userId);
+        row = database.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(userId);
+    }
+    return {
+        ...row,
+        interviewData: row.interview_data ? JSON.parse(row.interview_data) : {}
+    };
+}
+
+export function upsertUserProfile(userId, fields = {}) {
+    const database = getDb();
+    const existing = getUserProfile(userId);
+    
+    const profileText = fields.profile_text !== undefined ? fields.profile_text : existing.profile_text;
+    const interviewStep = fields.interview_step !== undefined ? fields.interview_step : existing.interview_step;
+    const interviewData = fields.interview_data !== undefined ? (typeof fields.interview_data === 'string' ? fields.interview_data : JSON.stringify(fields.interview_data)) : JSON.stringify(existing.interviewData);
+    const geminiApiKey = fields.gemini_api_key !== undefined ? fields.gemini_api_key : existing.gemini_api_key;
+    const scopeChannels = fields.scope_channels !== undefined ? fields.scope_channels : existing.scope_channels;
+    const scopeGroups = fields.scope_groups !== undefined ? fields.scope_groups : existing.scope_groups;
+    const scopeDms = fields.scope_dms !== undefined ? fields.scope_dms : existing.scope_dms;
+    const scopeBots = fields.scope_bots !== undefined ? fields.scope_bots : existing.scope_bots;
+
+    database.prepare(`
+        UPDATE user_profiles 
+        SET profile_text = ?,
+            interview_step = ?,
+            interview_data = ?,
+            gemini_api_key = ?,
+            scope_channels = ?,
+            scope_groups = ?,
+            scope_dms = ?,
+            scope_bots = ?,
+            updated_at = datetime('now')
+        WHERE user_id = ?
+    `).run(profileText, interviewStep, interviewData, geminiApiKey, scopeChannels, scopeGroups, scopeDms, scopeBots, userId);
+
+    return getUserProfile(userId);
+}
+
+export function updateUserGeminiKey(userId, apiKey) {
+    const database = getDb();
+    getUserProfile(userId); // ensure exists
+    database.prepare(`
+        UPDATE user_profiles 
+        SET gemini_api_key = ?, updated_at = datetime('now')
+        WHERE user_id = ?
+    `).run(apiKey ? apiKey.trim() : null, userId);
+}
+
+export function updateUserScope(userId, scopeKey, value) {
+    const allowed = ['scope_channels', 'scope_groups', 'scope_dms', 'scope_bots'];
+    if (!allowed.includes(scopeKey)) return;
+    const database = getDb();
+    getUserProfile(userId);
+    database.prepare(`
+        UPDATE user_profiles
+        SET ${scopeKey} = ?, updated_at = datetime('now')
+        WHERE user_id = ?
+    `).run(value ? 1 : 0, userId);
+}
+
+// -------------------------------------------------------------
+// ANALYZED MESSAGES (GEMINI AI FEED)
+// -------------------------------------------------------------
+
+export function saveAnalyzedMessage(userId, msg) {
+    const database = getDb();
+    const id = msg.id || 'ai_' + Math.random().toString(36).substring(2, 10);
+    try {
+        database.prepare(`
+            INSERT INTO analyzed_messages (
+                id, user_id, source_type, source_name, source_identifier,
+                message_id, link, original_text, importance_score, is_urgent,
+                category, ai_summary, ai_reasoning, action_items, is_read, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, datetime('now'))
+        `).run(
+            id,
+            userId,
+            msg.source_type || 'channel',
+            msg.source_name || '',
+            msg.source_identifier || '',
+            msg.message_id ? String(msg.message_id) : '',
+            msg.link || '',
+            msg.original_text || '',
+            msg.importance_score || 0,
+            msg.is_urgent ? 1 : 0,
+            msg.category || 'general',
+            msg.ai_summary || '',
+            msg.ai_reasoning || '',
+            msg.action_items || ''
+        );
+        return id;
+    } catch (err) {
+        logger.error('DB_ANALYZED', `Xabarni saqlashda xato: ${err.message}`);
+        return null;
+    }
+}
+
+export function getRecentAnalyzedMessages(userId, limit = 10, offset = 0, onlyUnread = false) {
+    const database = getDb();
+    let query = `
+        SELECT * FROM analyzed_messages 
+        WHERE user_id = ? 
+    `;
+    if (onlyUnread) {
+        query += ` AND is_read = 0 `;
+    }
+    query += ` ORDER BY created_at DESC LIMIT ? OFFSET ? `;
+    return database.prepare(query).all(userId, limit, offset);
+}
+
+export function getAnalyzedMessagesForDigest(userId, limit = 30, hours = 24) {
+    const database = getDb();
+    return database.prepare(`
+        SELECT * FROM analyzed_messages
+        WHERE user_id = ? 
+          AND created_at >= datetime('now', '-' || ? || ' hours')
+        ORDER BY importance_score DESC, created_at DESC
+        LIMIT ?
+    `).all(userId, hours, limit);
+}
+
+export function getAnalyzedMessageById(id) {
+    const database = getDb();
+    return database.prepare('SELECT * FROM analyzed_messages WHERE id = ?').get(id);
+}
+
+export function markAnalyzedMessageAsRead(userId, id) {
+    const database = getDb();
+    const info = database.prepare('UPDATE analyzed_messages SET is_read = 1 WHERE user_id = ? AND id = ?').run(userId, id);
+    return info.changes > 0;
+}
+
+export function markAllAnalyzedAsRead(userId) {
+    const database = getDb();
+    const info = database.prepare('UPDATE analyzed_messages SET is_read = 1 WHERE user_id = ? AND is_read = 0').run(userId);
+    return info.changes;
+}
+
+export function getUnreadAnalyzedCount(userId) {
+    const database = getDb();
+    const row = database.prepare('SELECT COUNT(*) as count FROM analyzed_messages WHERE user_id = ? AND is_read = 0').get(userId);
+    return row?.count || 0;
+}
+
+export function clearAnalyzedMessages(userId) {
+    const database = getDb();
+    database.prepare('DELETE FROM analyzed_messages WHERE user_id = ?').run(userId);
+}
+
 
 // -------------------------------------------------------------
 // CLOSE / CLEANUP

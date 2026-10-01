@@ -79,7 +79,7 @@ export default {
     text_truncated: "Message truncated due to Telegram size limit",
     
     // Help & Common
-    help_text: "📖 <b>WorkBot Help Guide:</b>\n\n/start - Start the bot\n/login - Connect your Telegram account\n/logout - Disconnect account\n/status - View profile and monitoring status\n/keywords - Manage search keywords\n/stopwords - Manage Anti-CV stop-words\n/saved - View saved vacancies\n/language - Change language\n/help - View this guide",
+    help_text: "📖 <b>WorkBot & AI Telegram Assistant Guide:</b>\n\n🧠 <b>AI & Smart Filtering:</b>\n/profile - User persona, AI interview & scope settings\n/digest - Executive AI Briefing of critical messages (Smart Digest)\n/inbox - Filtered important messages\n/setgemini - Set Google Gemini API key\n\n⚙️ <b>Core Commands:</b>\n/login - Connect your Telegram account\n/status - View profile and monitoring status\n/keywords - Manage search keywords\n/stopwords - Anti-CV stop-words\n/saved - View saved messages\n/language - Change language\n/logout - Disconnect account\n/help - View this guide",
     btn_back: "🔙 Back",
     btn_cancel: "❌ Cancel",
     btn_main_menu: "🏠 Main Menu",

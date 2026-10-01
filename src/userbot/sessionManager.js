@@ -9,7 +9,9 @@ import {
     getKeywords,
     getStopWords,
     isDuplicateHash,
-    addMessageHash
+    addMessageHash,
+    getUserProfile,
+    saveAnalyzedMessage
 } from '../database/db.js';
 import {
     decryptSession,
@@ -19,12 +21,18 @@ import {
     formatVacancyAlert
 } from '../utils/filter.js';
 import { getLocale } from '../locales/i18n.js';
+import { analyzeMessageWithGemini } from '../services/geminiService.js';
 
-// Telegram Bot API orqali xabar yuboruvchi tashqi callback funksiyasi
+// Telegram Bot API orqali xabar yuboruvchi tashqi callback funksiyalari
 let sendVacancyAlertCallback = null;
+let sendAiAlertCallback = null;
 
 export function registerAlertSender(fn) {
     sendVacancyAlertCallback = fn;
+}
+
+export function registerAiAlertSender(fn) {
+    sendAiAlertCallback = fn;
 }
 
 /**
@@ -86,79 +94,166 @@ export async function startUserSession(userId) {
             // Foydalanuvchining o'z xabarlariga tegilmaydi
             if (message.out) return;
 
-            // Shaxsiy yozishmalarga tegilmaydi (faqat guruh va kanallar)
-            if (message.isPrivate || message.peerId?.className === 'PeerUser') return;
-
             const msgText = message.message || message.text;
             // Xotirani tejash: matnsiz yoki juda qisqa xabarlarga e'tibor berilmaydi
-            if (!msgText || typeof msgText !== 'string' || msgText.trim().length < 5) return;
+            if (!msgText || typeof msgText !== 'string' || msgText.trim().length < 6) return;
 
             try {
-                // 1. Kalit so'zlar tekshiruvi (eng boshida tekshirilib, keraksiz getChat RPC so'rovlari oldi olinadi)
-                const userKeywords = getKeywords(userId);
-                if (!userKeywords || userKeywords.length === 0) return;
+                // Foydalanuvchi profili va AI sozlamalari
+                const profile = getUserProfile(userId);
+                const geminiKey = profile?.gemini_api_key || env.geminiApiKey;
 
-                const matchedKeywords = findMatchedKeywords(msgText, userKeywords);
-                if (matchedKeywords.length === 0) return;
-
-                // 2. Anti-CV va Stop-so'zlar tekshiruvi
-                const userStopWords = getStopWords(userId);
-                const stopWordFound = checkAntiCvStopWords(msgText, userStopWords);
-                if (stopWordFound) {
+                // Tezkor shovqin filtri: 1-2 so'zli oddiy salom-aliklar Gemini ga yuborilmaydi
+                const isVeryShort = msgText.trim().split(/\s+/).length < 3 && msgText.trim().length < 25;
+                const isCommonNoise = /^(salom|assalomu alaykum|privet|hi|hello|ok|rahmat|spasibo|tushundim|ha|yo'q|yoq|yaxshi|norm|xa|va alaykum|hayrli kun|zo'r|zur)\b/i.test(msgText.trim());
+                if (isVeryShort && isCommonNoise) {
                     return;
                 }
 
-                // 3. Anti-Duplicate (SHA-256 xesh tekshiruvi)
+                // Anti-Duplicate (SHA-256 xesh tekshiruvi)
                 const msgHash = hashMessage(msgText);
                 if (!msgHash || isDuplicateHash(userId, msgHash)) {
                     return;
                 }
                 addMessageHash(userId, msgHash);
 
-                // 4. Kanal / Chat ma'lumotlarini olish (faqat kalit so'z to'liq mos kelgandagina)
-                const chat = await message.getChat();
-                if (!chat || chat.className === 'User') return;
-
-                // Kanal identifikatori va havola yasash
-                let channelIdentifier = chat.username ? `@${chat.username}` : (chat.id ? chat.id.toString() : '');
+                // Chat turini aniqlash (Channel, Group, DM, Bot)
+                let sourceType = 'channel';
+                let sourceName = 'Telegram Chat';
+                let sourceIdentifier = '';
                 let link = '';
-                if (chat.username) {
-                    link = `https://t.me/${chat.username}/${message.id}`;
-                } else if (chat.id) {
-                    const cleanId = chat.id.toString().replace(/^-100/, '').replace(/^-/, '');
-                    link = `https://t.me/c/${cleanId}/${message.id}`;
+
+                if (message.isPrivate) {
+                    let sender = null;
+                    try {
+                        sender = await message.getSender();
+                    } catch {}
+
+                    if (sender?.bot) {
+                        sourceType = 'bot';
+                        if (!profile.scope_bots) return;
+                        sourceName = sender.firstName || sender.username || 'Telegram Bot';
+                        sourceIdentifier = sender.username ? `@${sender.username}` : (sender.id ? sender.id.toString() : '');
+                    } else {
+                        sourceType = 'dm';
+                        if (!profile.scope_dms) return;
+                        sourceName = sender ? `${sender.firstName || ''} ${sender.lastName || ''}`.trim() || sender.username || 'Foydalanuvchi' : 'Shaxsiy chat';
+                        sourceIdentifier = sender?.username ? `@${sender.username}` : (sender?.id ? sender.id.toString() : '');
+                    }
+                } else {
+                    let chat = null;
+                    try {
+                        chat = await message.getChat();
+                    } catch {}
+
+                    if (!chat) return;
+
+                    const isBroadcast = Boolean(chat.broadcast);
+
+                    if (isBroadcast) {
+                        sourceType = 'channel';
+                        if (!profile.scope_channels) return;
+                    } else {
+                        sourceType = 'group';
+                        if (!profile.scope_groups) return;
+                    }
+
+                    sourceName = chat.title || 'Telegram Chat';
+                    sourceIdentifier = chat.username ? `@${chat.username}` : (chat.id ? chat.id.toString() : '');
+
+                    if (chat.username) {
+                        link = `https://t.me/${chat.username}/${message.id}`;
+                    } else if (chat.id) {
+                        const cleanId = chat.id.toString().replace(/^-100/, '').replace(/^-/, '');
+                        link = `https://t.me/c/${cleanId}/${message.id}`;
+                    }
                 }
 
-                const channelName = chat.title || channelIdentifier || 'Telegram Chat';
-                logger.match(userId, channelName, matchedKeywords);
-
-                // 5. Foydalanuvchining tiliga mos formatlash
                 const currentUser = getUser(userId);
                 const userLang = currentUser?.language || 'uz';
-                const langStrings = getLocale(userLang);
 
-                const formatted = formatVacancyAlert({
-                    channelName,
-                    text: msgText,
-                    link,
-                    keywords: matchedKeywords,
-                    channelIdentifier,
-                    langStrings
-                });
-
-                // 6. Telegram Bot API orqali ogohlantirish yuborish
-                if (sendVacancyAlertCallback) {
-                    await sendVacancyAlertCallback({
-                        userId,
-                        channelName,
-                        cleanText: formatted.cleanText,
-                        formattedText: formatted.formattedText,
-                        link,
-                        channelIdentifier,
-                        matchedKeywords,
-                        contacts: formatted.contacts,
-                        userLang
+                // 1. GEMINI AI TAHLILI (Agar Gemini API kalit mavjud bo'lsa)
+                if (geminiKey) {
+                    const analysis = await analyzeMessageWithGemini({
+                        apiKey: geminiKey,
+                        userProfile: profile.profile_text,
+                        text: msgText,
+                        sourceInfo: {
+                            type: sourceType,
+                            name: sourceName,
+                            identifier: sourceIdentifier
+                        },
+                        language: userLang
                     });
+
+                    if (analysis && analysis.is_important) {
+                        logger.info('GEMINI_MATCH', `[User ${userId}] [${sourceType.toUpperCase()}] ${sourceName}: Ball ${analysis.importance_score}/10, Shoshilinch: ${analysis.is_urgent ? 'HA' : 'YO\'Q'}`);
+
+                        const savedId = saveAnalyzedMessage(userId, {
+                            source_type: sourceType,
+                            source_name: sourceName,
+                            source_identifier: sourceIdentifier,
+                            message_id: message.id,
+                            link,
+                            original_text: msgText,
+                            importance_score: analysis.importance_score || (analysis.priority === 'HIGH' ? 9 : 6),
+                            is_urgent: analysis.is_urgent || analysis.priority === 'HIGH',
+                            category: analysis.category || 'General',
+                            ai_summary: analysis.nima_boldi || analysis.summary || '',
+                            ai_reasoning: analysis.nima_uchun_muhim || analysis.why_it_matters || '',
+                            action_items: analysis.sizdan_kerak || analysis.action || ''
+                        });
+
+                        // Agar xabar o'ta muhim yoki shoshilinch bo'lsa -> zudlik bilan bot orqali yuborish
+                        if ((analysis.is_urgent || analysis.importance_score >= 8) && sendAiAlertCallback) {
+                            await sendAiAlertCallback({
+                                userId,
+                                messageId: savedId,
+                                sourceType,
+                                sourceName,
+                                sourceIdentifier,
+                                link,
+                                originalText: msgText,
+                                analysis,
+                                userLang
+                            });
+                        }
+                    }
+                }
+
+                // 2. MAVJUD KALIT SO'ZLAR / VAKANSIYALAR FILTRI (Kanal va guruhlar uchun moslik)
+                const userKeywords = getKeywords(userId);
+                if (userKeywords && userKeywords.length > 0 && (sourceType === 'channel' || sourceType === 'group')) {
+                    const matchedKeywords = findMatchedKeywords(msgText, userKeywords);
+                    if (matchedKeywords.length > 0) {
+                        const userStopWords = getStopWords(userId);
+                        if (!checkAntiCvStopWords(msgText, userStopWords)) {
+                            logger.match(userId, sourceName, matchedKeywords);
+                            const langStrings = getLocale(userLang);
+                            const formatted = formatVacancyAlert({
+                                channelName: sourceName,
+                                text: msgText,
+                                link,
+                                keywords: matchedKeywords,
+                                channelIdentifier: sourceIdentifier,
+                                langStrings
+                            });
+
+                            if (sendVacancyAlertCallback) {
+                                await sendVacancyAlertCallback({
+                                    userId,
+                                    channelName: sourceName,
+                                    cleanText: formatted.cleanText,
+                                    formattedText: formatted.formattedText,
+                                    link,
+                                    channelIdentifier: sourceIdentifier,
+                                    matchedKeywords,
+                                    contacts: formatted.contacts,
+                                    userLang
+                                });
+                            }
+                        }
+                    }
                 }
             } catch (err) {
                 logger.error('SESSION_EVENT', `User ${userId} xabar tahlilida xato: ${err.message}`);

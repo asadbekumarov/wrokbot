@@ -22,6 +22,8 @@ export const env = Object.freeze({
     apiHash: process.env.API_HASH.trim(),
     botToken: process.env.BOT_TOKEN.trim(),
     encryptionKey: encryptionKey.trim(),
+    geminiApiKey: process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.trim() : null,
     port: parseInt(process.env.PORT || '8080', 10),
     myChatId: process.env.MY_CHAT_ID ? process.env.MY_CHAT_ID.trim() : null
 });
+

@@ -14,15 +14,19 @@ import {
     getSavedVacancies,
     getSavedVacanciesCount,
     deleteSavedVacancy,
-    clearSavedVacancies,
-    isVacancySaved
+    isVacancySaved,
+    getUserProfile,
+    setUserState,
+    getUnreadAnalyzedCount
 } from '../database/db.js';
 import { escapeHtml } from '../utils/filter.js';
-import { registerAlertSender, isUserSessionActive } from '../userbot/sessionManager.js';
+import { registerAlertSender, registerAiAlertSender, isUserSessionActive } from '../userbot/sessionManager.js';
 
 import { handleLanguageCommand, handleLanguageCallback } from './handlers/languageHandler.js';
 import { handleKeywordsCommand, handleStopWordsCommand, handleKeywordCallback, processKeywordTextInput } from './handlers/keywordHandler.js';
 import { handleLoginCommand, handleLogoutCommand, handleAuthCallback, processAuthTextInput } from './handlers/authHandler.js';
+import { handleProfileCommand, handleProfileCallback, processProfileTextInput, showUserProfile } from './handlers/profileHandler.js';
+import { handleDigestCommand, handleInboxCommand, handleInboxCallback } from './handlers/digestHandler.js';
 
 let bot = null;
 
@@ -43,8 +47,9 @@ export function initBot() {
         }
     });
 
-    // Sessiya menejeri uchun bildirishnoma jo'natuvchini ro'yxatdan o'tkazish
+    // Sessiya menejeri uchun bildirishnoma jo'natuvchilarni ro'yxatdan o'tkazish
     registerAlertSender(sendVacancyAlert);
+    registerAiAlertSender(sendAiMessageAlert);
 
     // Polling xatolarini ushlash (uzilishlarda bot qulamasligi uchun)
     bot.on('polling_error', (error) => {
@@ -67,11 +72,15 @@ async function setupBotCommands() {
     try {
         await bot.setMyCommands([
             { command: 'start', description: 'Botni ishga tushirish / qayta yuklash' },
+            { command: 'profile', description: '🧠 Shaxsiy profil va AI sozlamalari' },
+            { command: 'digest', description: '📋 Muhim xabarlar brifingi (Smart Digest)' },
+            { command: 'inbox', description: '📥 Saralangan muhim xabarlar qutisi' },
             { command: 'login', description: 'Telegram hisobini ulash (SMS kod)' },
             { command: 'keywords', description: 'Qidiruv kalit so\'zlarini sozlash' },
             { command: 'stopwords', description: 'Anti-CV va stop-so\'zlar' },
             { command: 'saved', description: 'Saqlangan vakansiyalar' },
             { command: 'status', description: 'Hisob va monitoring holati' },
+            { command: 'setgemini', description: '🔑 Gemini API kalitini kiritish' },
             { command: 'language', description: 'Tilni o\'zgartirish / Choose language' },
             { command: 'logout', description: 'Hisobni uzish' },
             { command: 'help', description: 'Qo\'llanma va yordam' }
@@ -85,15 +94,22 @@ export function getMainInlineKeyboard(lang = 'uz') {
     return {
         inline_keyboard: [
             [
-                { text: t(lang, 'menu_status'), callback_data: "menu_status" },
-                { text: t(lang, 'menu_keywords'), callback_data: "menu_keywords" }
+                { text: "🧠 Shaxsiy Profil & AI", callback_data: "menu_profile" },
+                { text: "📋 Smart Brifing", callback_data: "menu_digest" }
             ],
             [
-                { text: t(lang, 'menu_saved'), callback_data: "menu_saved" },
-                { text: t(lang, 'menu_stopwords'), callback_data: "menu_stopwords" }
+                { text: "📥 Muhim Inbox", callback_data: "menu_inbox" },
+                { text: t(lang, 'menu_status'), callback_data: "menu_status" }
             ],
             [
-                { text: t(lang, 'menu_language'), callback_data: "menu_language" },
+                { text: t(lang, 'menu_keywords'), callback_data: "menu_keywords" },
+                { text: t(lang, 'menu_saved'), callback_data: "menu_saved" }
+            ],
+            [
+                { text: t(lang, 'menu_stopwords'), callback_data: "menu_stopwords" },
+                { text: t(lang, 'menu_language'), callback_data: "menu_language" }
+            ],
+            [
                 { text: t(lang, 'menu_help'), callback_data: "menu_help" }
             ]
         ]
@@ -204,6 +220,33 @@ function setupBotListeners() {
         await showSavedVacancies(msg.from.id, 0);
     });
 
+    bot.onText(/\/profile/, async (msg) => {
+        const user = getUser(msg.from.id);
+        const lang = user?.language || 'uz';
+        if (!checkUserLoggedIn(msg.from.id, lang)) return;
+        await handleProfileCommand(bot, msg);
+    });
+
+    bot.onText(/\/digest/, async (msg) => {
+        const user = getUser(msg.from.id);
+        const lang = user?.language || 'uz';
+        if (!checkUserLoggedIn(msg.from.id, lang)) return;
+        await handleDigestCommand(bot, msg);
+    });
+
+    bot.onText(/\/inbox/, async (msg) => {
+        const user = getUser(msg.from.id);
+        const lang = user?.language || 'uz';
+        if (!checkUserLoggedIn(msg.from.id, lang)) return;
+        await handleInboxCommand(bot, msg);
+    });
+
+    bot.onText(/\/setgemini/, async (msg) => {
+        const userId = msg.from.id;
+        setUserState(userId, 'AWAIT_GEMINI_KEY', {});
+        await bot.sendMessage(userId, `🔑 <b>Google Gemini API kalitingizni yuboring:</b>\n\nBekor qilish uchun /cancel deb yozing:`, { parse_mode: 'HTML' });
+    });
+
     bot.onText(/\/help/, async (msg) => {
         const userId = msg.from.id;
         const user = getUser(userId);
@@ -225,8 +268,14 @@ function setupBotListeners() {
         const lang = user?.language || 'uz';
         const userState = getUserState(userId);
 
-        // A. Agar biror formani to'ldirayotgan bo'lsa (Login / Keywords)
+        // A. Agar biror formani to'ldirayotgan bo'lsa (Login / Keywords / Profile)
         if (userState && userState.state) {
+            // Profile va Gemini kalit kiritish
+            if (['AWAIT_PROFILE_TEXT', 'AWAIT_GEMINI_KEY', 'AWAIT_INTERVIEW_ANSWER'].includes(userState.state)) {
+                const handled = await processProfileTextInput(bot, msg, userState);
+                if (handled) return;
+            }
+
             // Login jarayoni
             if (['AWAIT_PHONE', 'AWAIT_CODE', 'AWAIT_2FA'].includes(userState.state)) {
                 const handled = await processAuthTextInput(bot, msg, userState);
@@ -356,7 +405,16 @@ function setupBotListeners() {
                 const user = getUser(userId);
                 const lang = user?.language || 'uz';
 
-                if (data === 'menu_status') {
+                if (data === 'menu_profile') {
+                    if (!checkUserLoggedIn(userId, lang)) return;
+                    await showUserProfile(bot, userId);
+                } else if (data === 'menu_digest') {
+                    if (!checkUserLoggedIn(userId, lang)) return;
+                    await handleDigestCommand(bot, { from: { id: userId } });
+                } else if (data === 'menu_inbox') {
+                    if (!checkUserLoggedIn(userId, lang)) return;
+                    await handleInboxCommand(bot, { from: { id: userId } });
+                } else if (data === 'menu_status') {
                     if (!checkUserLoggedIn(userId, lang)) return;
                     await showUserStatus(userId);
                 } else if (data === 'menu_keywords') {
@@ -373,6 +431,18 @@ function setupBotListeners() {
                 } else if (data === 'menu_help') {
                     await bot.sendMessage(userId, t(lang, 'help_text'), { parse_mode: 'HTML' });
                 }
+                return;
+            }
+
+            // Profil va Scope sozlamalari
+            if (data.startsWith('prof_') || data.startsWith('scope_')) {
+                await handleProfileCallback(bot, query);
+                return;
+            }
+
+            // Smart Brifing va Inbox
+            if (data.startsWith('digest_') || data.startsWith('inbox_')) {
+                await handleInboxCallback(bot, query);
                 return;
             }
 
@@ -501,16 +571,28 @@ async function showUserStatus(userId) {
     const stopWords = getStopWords(userId);
     const savedCount = getSavedVacanciesCount(userId);
     const isActive = isUserSessionActive(userId);
+    const profile = getUserProfile(userId);
+    const unreadAiCount = getUnreadAnalyzedCount(userId);
+    const hasGemini = Boolean(profile.gemini_api_key || env.geminiApiKey);
 
     let text = t(lang, 'status_title') + '\n\n';
     text += `👤 <b>ID:</b> <code>${userId}</code>\n`;
     text += t(lang, 'status_phone', { phone: user?.phone || '—' }) + '\n';
-    text += `🟢 <b>Monitoring:</b> ${isActive ? t(lang, 'session_active') : t(lang, 'session_inactive')}\n\n`;
+    text += `🟢 <b>Telegram Monitoring:</b> ${isActive ? t(lang, 'session_active') : t(lang, 'session_inactive')}\n`;
+    text += `🤖 <b>Gemini AI:</b> ${hasGemini ? '🟢 Ulangan' : '🔴 Ulanmagan'}\n`;
+    text += `📝 <b>Profil:</b> ${profile.profile_text ? '🟢 Kiritilgan' : '🟡 Kiritilmagan'}\n\n`;
+    text += `📥 <b>Saralangan muhim xabarlar:</b> <b>${unreadAiCount}</b> ta o'qilmagan\n`;
     text += t(lang, 'status_keywords_count', { count: keywords.length }) + '\n';
     text += t(lang, 'status_stopwords_count', { count: stopWords.length }) + '\n';
     text += t(lang, 'status_saved_count', { count: savedCount }) + '\n';
 
-    const inline_keyboard = [];
+    const inline_keyboard = [
+        [
+            { text: "🧠 Shaxsiy Profil & AI", callback_data: "menu_profile" },
+            { text: "📋 Smart Brifing", callback_data: "menu_digest" }
+        ]
+    ];
+
     if (!isActive) {
         inline_keyboard.push([{ text: t(lang, 'login_btn'), callback_data: 'auth_login' }]);
     } else {
@@ -658,3 +740,85 @@ export async function sendVacancyAlert({
         logger.error('BOT_ALERT', `User ${userId} ga alert jo'natishda xato: ${err.message}`);
     }
 }
+
+// -------------------------------------------------------------
+// AI SARALANGAN XABARLAR BILDIRISHNOMASI (SEND AI ALERT)
+// -------------------------------------------------------------
+
+export async function sendAiMessageAlert({
+    userId,
+    messageId,
+    sourceType,
+    sourceName,
+    sourceIdentifier,
+    link,
+    originalText,
+    analysis,
+    userLang
+}) {
+    if (!bot) return;
+
+    const priority = (analysis.priority || (analysis.is_urgent ? 'HIGH' : (analysis.importance_score >= 8 ? 'HIGH' : 'MEDIUM'))).toUpperCase();
+    const typeIcon = sourceType === 'dm' ? '👤 User' : (sourceType === 'bot' ? '🤖 Bot' : (sourceType === 'group' ? '👥 Guruh' : '📢 Kanal'));
+    const kim = analysis.kim || sourceName;
+
+    let text = `🚨 <b>MUHIM — ${priority}</b>\n\n`;
+    text += `👤 <b>Kim:</b> ${escapeHtml(kim)}\n`;
+    text += `📍 <b>Manba:</b> ${typeIcon} | <b>${escapeHtml(sourceName)}</b>`;
+    if (sourceIdentifier) {
+        text += ` (<code>${escapeHtml(sourceIdentifier)}</code>)`;
+    }
+    text += `\n\n`;
+
+    const nimaBoldi = analysis.nima_boldi || analysis.summary;
+    if (nimaBoldi) {
+        text += `📝 <b>Nima bo'ldi:</b>\n${escapeHtml(nimaBoldi)}\n\n`;
+    }
+
+    const nimaUchunMuhim = analysis.nima_uchun_muhim || analysis.why_it_matters || analysis.reasoning;
+    if (nimaUchunMuhim) {
+        text += `🧠 <b>Nima uchun muhim:</b>\n<i>${escapeHtml(nimaUchunMuhim)}</i>\n\n`;
+    }
+
+    const sizdanKerak = analysis.sizdan_kerak || analysis.action || analysis.action_item;
+    if (sizdanKerak && sizdanKerak !== 'null') {
+        text += `⚡️ <b>Sizdan kerak:</b>\n<code>${escapeHtml(sizdanKerak)}</code>\n\n`;
+    }
+
+    if (analysis.deadline && analysis.deadline !== 'null') {
+        text += `⏰ <b>Deadline:</b> ${escapeHtml(analysis.deadline)}\n\n`;
+    }
+
+    const excerpt = analysis.original_excerpt || (originalText || '').substring(0, 160).replace(/\s+/g, ' ');
+    if (excerpt) {
+        text += `💬 <b>Original message:</b>\n<i>"${escapeHtml(excerpt)}..."</i>`;
+    }
+
+    const inline_keyboard = [];
+    const row1 = [];
+
+    if (link && link.startsWith('http')) {
+        row1.push({ text: "🔗 Asl xabarga o'tish", url: link });
+    }
+    if (messageId) {
+        row1.push({ text: "✅ O'qildi", callback_data: `inbox_read_${messageId}_0` });
+    }
+    if (row1.length > 0) inline_keyboard.push(row1);
+
+    inline_keyboard.push([
+        { text: "📋 AI Dayjest (/digest)", callback_data: "digest_refresh" },
+        { text: "📥 Barcha Inbox", callback_data: "inbox_page_0" }
+    ]);
+
+    try {
+        await bot.sendMessage(userId, text, {
+            parse_mode: 'HTML',
+            disable_web_page_preview: true,
+            reply_markup: { inline_keyboard }
+        });
+    } catch (err) {
+        logger.error('BOT_AI_ALERT', `User ${userId} ga AI alert jo'natishda xato: ${err.message}`);
+    }
+}
+
+

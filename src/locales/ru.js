@@ -79,7 +79,7 @@ export default {
     text_truncated: "Текст сокращен из-за ограничения длины",
     
     // Help & Common
-    help_text: "📖 <b>WorkBot Справка:</b>\n\n/start - Запуск бота\n/login - Подключить аккаунт Telegram\n/logout - Отключить аккаунт\n/status - Статус и профиль\n/keywords - Управление ключевыми словами\n/stopwords - Стоп-слова (Анти-Резюме)\n/saved - Сохраненные вакансии\n/language - Выбор языка\n/help - Данная справка",
+    help_text: "📖 <b>Справка WorkBot & AI Telegram Assistant:</b>\n\n🧠 <b>ИИ и Фильтрация:</b>\n/profile - Профиль интересов, AI-интервью и настройки охвата\n/digest - Сводный AI-дайджест важных сообщений (Smart Digest)\n/inbox - Входящие важные сообщения\n/setgemini - Ввести ключ Google Gemini API\n\n⚙️ <b>Основные команды:</b>\n/login - Подключить аккаунт Telegram\n/status - Статус и профиль\n/keywords - Управление ключевыми словами\n/stopwords - Стоп-слова (Анти-Резюме)\n/saved - Сохраненные сообщения\n/language - Выбор языка\n/logout - Отключить аккаунт\n/help - Данная справка",
     btn_back: "🔙 Назад",
     btn_cancel: "❌ Отмена",
     btn_main_menu: "🏠 Главное меню",
