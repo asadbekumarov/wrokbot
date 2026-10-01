@@ -1,3 +1,6 @@
+import dns from 'node:dns';
+dns.setDefaultResultOrder('ipv4first');
+
 import { logger } from '../utils/logger.js';
 
 const CANDIDATE_MODELS = [

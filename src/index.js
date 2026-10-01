@@ -1,3 +1,6 @@
+import dns from 'node:dns';
+dns.setDefaultResultOrder('ipv4first');
+
 import http from 'node:http';
 import { env } from './config/env.js';
 import { logger } from './utils/logger.js';
