@@ -39,7 +39,6 @@ export function initBot() {
 
     bot = new TelegramBot(env.botToken, {
         polling: {
-            interval: 300,
             autoStart: true,
             params: {
                 timeout: 10
