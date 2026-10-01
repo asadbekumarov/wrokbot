@@ -91,12 +91,23 @@ export async function startUserSession(userId) {
             const message = event.message;
             if (!message) return;
 
-            // Foydalanuvchining o'z xabarlariga tegilmaydi
-            if (message.out) return;
+            // Foydalanuvchining o'z xabarlari filtri:
+            // Oddiy 1-ga-1 shaxsiy chatlarda boshqa odamga yozgan javoblari tashlab ketiladi.
+            // Lekin Kanallar (test kanallar ham), Guruhlar yoki O'ziga (Saved Messages) yozilgan test xabarlar doim tahlil qilinadi!
+            const isChannelOrGroup = Boolean(message.isChannel || message.isGroup || message.post);
+            if (message.out && !isChannelOrGroup) {
+                const peerUserId = (message.peerId?.userId || message.peerId?.user_id || '').toString();
+                const isSaved = peerUserId === userId.toString();
+                if (!isSaved) {
+                    return;
+                }
+            }
 
             const msgText = message.message || message.text;
             // Xotirani tejash: matnsiz yoki juda qisqa xabarlarga e'tibor berilmaydi
             if (!msgText || typeof msgText !== 'string' || msgText.trim().length < 6) return;
+
+            logger.info('USERBOT_MSG', `[User ${userId}] Yangi xabar: "${msgText.slice(0, 45).replace(/\n/g, ' ')}..." (out=${message.out}, isChannelOrGroup=${isChannelOrGroup})`);
 
             try {
                 // Foydalanuvchi profili va AI sozlamalari
@@ -124,21 +135,30 @@ export async function startUserSession(userId) {
                 let link = '';
 
                 if (message.isPrivate) {
-                    let sender = null;
-                    try {
-                        sender = await message.getSender();
-                    } catch {}
+                    const peerUserId = (message.peerId?.userId || message.peerId?.user_id || '').toString();
+                    const isSaved = peerUserId === userId.toString();
 
-                    if (sender?.bot) {
-                        sourceType = 'bot';
-                        if (!profile.scope_bots) return;
-                        sourceName = sender.firstName || sender.username || 'Telegram Bot';
-                        sourceIdentifier = sender.username ? `@${sender.username}` : (sender.id ? sender.id.toString() : '');
-                    } else {
+                    if (isSaved) {
                         sourceType = 'dm';
-                        if (!profile.scope_dms) return;
-                        sourceName = sender ? `${sender.firstName || ''} ${sender.lastName || ''}`.trim() || sender.username || 'Foydalanuvchi' : 'Shaxsiy chat';
-                        sourceIdentifier = sender?.username ? `@${sender.username}` : (sender?.id ? sender.id.toString() : '');
+                        sourceName = 'Saqlangan xabarlar (Saved Messages)';
+                        sourceIdentifier = 'Saved Messages';
+                    } else {
+                        let sender = null;
+                        try {
+                            sender = await message.getSender();
+                        } catch {}
+
+                        if (sender?.bot) {
+                            sourceType = 'bot';
+                            if (!profile.scope_bots) return;
+                            sourceName = sender.firstName || sender.username || 'Telegram Bot';
+                            sourceIdentifier = sender.username ? `@${sender.username}` : (sender.id ? sender.id.toString() : '');
+                        } else {
+                            sourceType = 'dm';
+                            if (!profile.scope_dms) return;
+                            sourceName = sender ? `${sender.firstName || ''} ${sender.lastName || ''}`.trim() || sender.username || 'Foydalanuvchi' : 'Shaxsiy chat';
+                            sourceIdentifier = sender?.username ? `@${sender.username}` : (sender?.id ? sender.id.toString() : '');
+                        }
                     }
                 } else {
                     let chat = null;
@@ -146,9 +166,13 @@ export async function startUserSession(userId) {
                         chat = await message.getChat();
                     } catch {}
 
-                    if (!chat) return;
+                    if (!chat) {
+                        try {
+                            chat = await client.getEntity(message.peerId);
+                        } catch {}
+                    }
 
-                    const isBroadcast = Boolean(chat.broadcast);
+                    const isBroadcast = Boolean(chat?.broadcast || message.isChannel && !message.isGroup || message.post);
 
                     if (isBroadcast) {
                         sourceType = 'channel';
@@ -158,12 +182,13 @@ export async function startUserSession(userId) {
                         if (!profile.scope_groups) return;
                     }
 
-                    sourceName = chat.title || 'Telegram Chat';
-                    sourceIdentifier = chat.username ? `@${chat.username}` : (chat.id ? chat.id.toString() : '');
+                    sourceName = chat?.title || message.chat?.title || (isBroadcast ? 'Telegram Kanal' : 'Telegram Guruh');
+                    const username = chat?.username || message.chat?.username;
+                    sourceIdentifier = username ? `@${username}` : (chat?.id ? chat.id.toString() : '');
 
-                    if (chat.username) {
-                        link = `https://t.me/${chat.username}/${message.id}`;
-                    } else if (chat.id) {
+                    if (username) {
+                        link = `https://t.me/${username}/${message.id}`;
+                    } else if (chat?.id) {
                         const cleanId = chat.id.toString().replace(/^-100/, '').replace(/^-/, '');
                         link = `https://t.me/c/${cleanId}/${message.id}`;
                     }
